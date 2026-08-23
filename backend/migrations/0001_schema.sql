@@ -89,6 +89,7 @@ CREATE TABLE IF NOT EXISTS event_registrations (
   course TEXT NOT NULL,
   year TEXT NOT NULL,
   designation TEXT NOT NULL,
+  qr_token TEXT UNIQUE, -- Cryptographically secure, independent revocable pass token
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE(event_id, email),
   UNIQUE(event_id, registration_id)
@@ -314,6 +315,7 @@ CREATE TABLE IF NOT EXISTS rate_limit_records (
 CREATE INDEX IF NOT EXISTS idx_events_slug ON events(slug);
 CREATE INDEX IF NOT EXISTS idx_registrations_event_id_email ON event_registrations(event_id, email);
 CREATE INDEX IF NOT EXISTS idx_registrations_event_id_reg ON event_registrations(event_id, registration_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_registrations_qr_token ON event_registrations(qr_token);
 CREATE INDEX IF NOT EXISTS idx_attendance_lookup ON attendance(event_id, registration_id, attendance_type);
 CREATE INDEX IF NOT EXISTS idx_resource_claims_lookup ON resource_claims(event_id, registration_id, resource_id);
 CREATE INDEX IF NOT EXISTS idx_certificate_records_id ON certificate_records(id);

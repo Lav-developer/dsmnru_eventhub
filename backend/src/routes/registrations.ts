@@ -6,7 +6,7 @@ import { rateLimit, limits } from '../utils/rateLimit';
 import { formatCSV } from '../utils/csv';
 import { checkEventAuthority } from './events';
 import { HonoTypes, User } from '../types';
-import { generateShortId } from '../utils/crypto';
+import { generateShortId, generateOpaqueToken } from '../utils/crypto';
 
 const registrations = new Hono<HonoTypes>();
 
@@ -99,6 +99,7 @@ registrations.post('/events/:id/register', rateLimit('registration', limits.regi
 
   // Generate opaque token for QR Code
   const id = crypto.randomUUID();
+  const qrToken = generateOpaqueToken(32);
   let registrationId = '';
   let insertSuccess = false;
   let attempts = 0;
@@ -110,8 +111,8 @@ registrations.post('/events/:id/register', rateLimit('registration', limits.regi
     try {
       await db
         .prepare(
-          `INSERT INTO event_registrations (id, event_id, registration_id, full_name, email, phone, college, department, course, year, designation)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          `INSERT INTO event_registrations (id, event_id, registration_id, full_name, email, phone, college, department, course, year, designation, qr_token)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .bind(
           id,
@@ -124,7 +125,8 @@ registrations.post('/events/:id/register', rateLimit('registration', limits.regi
           department,
           course,
           year,
-          designation
+          designation,
+          qrToken
         )
         .run();
       insertSuccess = true;
@@ -171,7 +173,7 @@ registrations.post('/events/:id/register', rateLimit('registration', limits.regi
   return c.json({
     success: true,
     data: {
-      id,
+      id: qrToken, // Truly opaque revocable pass token (never exposes internal record UUID)
       registrationId,
       full_name,
       email: email.toLowerCase(),
@@ -467,6 +469,7 @@ registrations.post('/events/:id/registrations/import-commit', requireAuth(['supe
       } else {
         // Insert new registration with collision protection
         const id = crypto.randomUUID();
+        const qrToken = generateOpaqueToken(32);
         let registrationId = '';
         let insertSuccess = false;
         let attempts = 0;
@@ -477,8 +480,8 @@ registrations.post('/events/:id/registrations/import-commit', requireAuth(['supe
           try {
             await db
               .prepare(
-                `INSERT INTO event_registrations (id, event_id, registration_id, full_name, email, phone, college, department, course, year, designation)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+                `INSERT INTO event_registrations (id, event_id, registration_id, full_name, email, phone, college, department, course, year, designation, qr_token)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
               )
               .bind(
                 id,
@@ -491,7 +494,8 @@ registrations.post('/events/:id/registrations/import-commit', requireAuth(['supe
                 String(p.department || 'N/A').substring(0, 150),
                 String(p.course || 'N/A').substring(0, 100),
                 String(p.year || 'N/A').substring(0, 30),
-                String(p.designation || 'Student').substring(0, 50)
+                String(p.designation || 'Student').substring(0, 50),
+                qrToken
               )
               .run();
             insertSuccess = true;

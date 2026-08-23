@@ -1,6 +1,5 @@
 export interface Env {
   DB: D1Database;
-  JWT_SECRET: string;
   ENV: string;
   RESEND_API_KEY?: string;
   FRONTEND_URL?: string;

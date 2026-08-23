@@ -57,7 +57,7 @@ operations.post('/events/:id/attendance/scan', rateLimit('scan', limits.scan), a
 
   // Look up participant from token
   const reg = await db
-    .prepare('SELECT id, full_name, registration_id, email, college FROM event_registrations WHERE event_id = ? AND id = ?')
+    .prepare('SELECT id, full_name, registration_id, email, college FROM event_registrations WHERE event_id = ? AND qr_token = ?')
     .bind(eventId, opaque_token)
     .first<any>();
 
@@ -235,14 +235,9 @@ operations.post('/events/:id/resources/:resourceId/scan', rateLimit('scan', limi
     throw new AppError('This resource is currently marked inactive', 'RESOURCE_INACTIVE', 400);
   }
 
-  const remaining = resource.quantity - resource.claimed_count;
-  if (remaining <= 0) {
-    throw new AppError(`Resource "${resource.name}" has been fully claimed (0 remaining).`, 'RESOURCE_EXHAUSTED', 400);
-  }
-
-  // Look up participant
+  // Look up participant from opaque revocable qr_token
   const reg = await db
-    .prepare('SELECT id, full_name, registration_id, email, college FROM event_registrations WHERE event_id = ? AND id = ?')
+    .prepare('SELECT id, full_name, registration_id, email, college FROM event_registrations WHERE event_id = ? AND qr_token = ?')
     .bind(eventId, opaque_token)
     .first<any>();
 
@@ -264,14 +259,24 @@ operations.post('/events/:id/resources/:resourceId/scan', rateLimit('scan', limi
 
   try {
     const claimId = crypto.randomUUID();
-    // Unique constraint on (event_id, registration_id, resource_id) guarantees safety
-    await db
+    // Unique constraint on (event_id, registration_id, resource_id) guarantees safety.
+    // Subquery inside atomic INSERT SELECT statement check guarantees quantity limits are never exceeded under high-concurrency race conditions.
+    const result = await db
       .prepare(
         `INSERT INTO resource_claims (id, event_id, registration_id, resource_id, scanner_id)
-         VALUES (?, ?, ?, ?, ?)`
+         SELECT ?, ?, ?, ?, ?
+         WHERE (
+           SELECT COUNT(*) FROM resource_claims WHERE resource_id = ?
+         ) < (
+           SELECT quantity FROM resources WHERE id = ? AND status = 'active'
+         )`
       )
-      .bind(claimId, eventId, reg.id, resourceId, user.id)
+      .bind(claimId, eventId, reg.id, resourceId, user.id, resourceId, resourceId)
       .run();
+
+    if (result.meta.changes === 0) {
+      throw new AppError(`Resource "${resource.name}" has been fully claimed (0 remaining).`, 'RESOURCE_EXHAUSTED', 400);
+    }
 
     return c.json({
       success: true,

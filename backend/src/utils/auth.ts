@@ -5,7 +5,7 @@ import { User, UserRole, HonoTypes } from '../types';
 export async function authenticate(c: Context<HonoTypes>, next: Next) {
   const db = c.env.DB;
   
-  // Try cookie first, then Authorization header
+  // Enforce secure cookie-only sessions authentication
   let token = '';
   const cookieHeader = c.req.header('Cookie') || '';
   const cookies = Object.fromEntries(
@@ -17,11 +17,6 @@ export async function authenticate(c: Context<HonoTypes>, next: Next) {
   
   if (cookies['session_token']) {
     token = cookies['session_token'];
-  } else {
-    const authHeader = c.req.header('Authorization') || '';
-    if (authHeader.startsWith('Bearer ')) {
-      token = authHeader.substring(7);
-    }
   }
 
   if (!token) {
