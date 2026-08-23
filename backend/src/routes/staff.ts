@@ -32,7 +32,7 @@ async function createProvisionedUser(
       `INSERT INTO users (id, email, password_hash, full_name, phone, role, status, password_set)
        VALUES (?, ?, ?, ?, ?, ?, ?, 0)`
     )
-    .bind(userId, email, passwordHash, opts.full_name, opts.phone || null, opts.role, opts.status || 'invited')
+    .bind(userId, email, passwordHash, opts.full_name, opts.phone || null, opts.role, opts.status || 'active')
     .run();
   const setupToken = await createSetupToken(db, userId);
   return { userId, setupToken };
@@ -56,7 +56,7 @@ staff.post('/department-heads', async (c) => {
     full_name,
     phone,
     role: 'department_head',
-    status: 'invited'
+    status: 'active'
   });
   await db
     .prepare('INSERT INTO department_members (department_id, user_id) VALUES (?, ?)')
@@ -71,7 +71,7 @@ staff.post('/department-heads', async (c) => {
       id: userId,
       email: email.toLowerCase(),
       role: 'department_head',
-      status: 'invited',
+      status: 'active',
       setup_token: setupToken
     }
   });
@@ -81,27 +81,21 @@ staff.post('/department-heads', async (c) => {
 staff.post('/coordinators', async (c) => {
   const db = c.env.DB;
   const actor = c.get('user') as User;
-  requireRoles(actor, ['super_admin', 'department_head']);
+  requireRoles(actor, ['department_head']);
   const body = await c.req.json().catch(() => ({}));
   const { email, full_name, phone } = body;
   if (!email || !full_name) {
     throw new AppError('Missing email or full_name', 'VALIDATION_ERROR', 400);
   }
 
-  let departmentId: string;
-  if (actor.role === 'department_head') {
-    departmentId = await requireUserDepartment(db, actor.id);
-  } else {
-    if (!body.department_id) throw new AppError('Missing department_id', 'VALIDATION_ERROR', 400);
-    departmentId = body.department_id;
-  }
+  const departmentId = await requireUserDepartment(db, actor.id);
 
   const { userId, setupToken } = await createProvisionedUser(db, {
     email,
     full_name,
     phone,
     role: 'coordinator',
-    status: 'invited'
+    status: 'active'
   });
   await db
     .prepare('INSERT INTO department_members (department_id, user_id) VALUES (?, ?)')
@@ -112,7 +106,7 @@ staff.post('/coordinators', async (c) => {
 
   return c.json({
     success: true,
-    data: { id: userId, email: email.toLowerCase(), role: 'coordinator', status: 'invited', setup_token: setupToken }
+    data: { id: userId, email: email.toLowerCase(), role: 'coordinator', status: 'active', setup_token: setupToken }
   });
 });
 
@@ -120,7 +114,7 @@ staff.post('/coordinators', async (c) => {
 staff.post('/volunteers', async (c) => {
   const db = c.env.DB;
   const actor = c.get('user') as User;
-  requireRoles(actor, ['super_admin', 'department_head', 'coordinator']);
+  requireRoles(actor, ['coordinator']);
   const body = await c.req.json().catch(() => ({}));
   const { email, full_name, phone, event_id, permissions } = body;
   if (!email || !full_name || !event_id) {
@@ -147,7 +141,7 @@ staff.post('/volunteers', async (c) => {
       full_name,
       phone,
       role: 'volunteer',
-      status: 'invited'
+      status: 'active'
     });
     userId = created.userId;
     setupToken = created.setupToken;
@@ -172,7 +166,7 @@ staff.post('/volunteers', async (c) => {
 
   return c.json({
     success: true,
-    data: { id: userId, email: email.toLowerCase(), role: 'volunteer', status: setupToken ? 'invited' : 'active', setup_token: setupToken }
+    data: { id: userId, email: email.toLowerCase(), role: 'volunteer', status: 'active', setup_token: setupToken }
   });
 });
 

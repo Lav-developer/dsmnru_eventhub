@@ -248,7 +248,6 @@ export default function App() {
           <Routes>
             <Route path="/" element={<Home />} />
             <Route path="/login" element={<Login setCurrentUser={setCurrentUser} />} />
-            <Route path="/register" element={<Register />} />
             <Route path="/setup-password" element={<SetupPassword />} />
             <Route path="/events/:slug" element={<EventPage />} />
             <Route path="/verify/:certificateId" element={<CertificateVerifyPage />} />

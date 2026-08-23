@@ -9,8 +9,6 @@ import { consumeSetupToken } from '../utils/provision';
 
 const auth = new Hono<HonoTypes>();
 
-const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
 function assertPasswordPolicy(password: string) {
   if (!password || password.length < 8) {
     throw new AppError('Password must be at least 8 characters long', 'VALIDATION_ERROR', 400);
@@ -20,70 +18,8 @@ function assertPasswordPolicy(password: string) {
   }
 }
 
-// POST /register — bootstrap first Super Admin only. Never trusts client role.
-auth.post('/register', rateLimit('auth', limits.auth), async (c) => {
-  const db = c.env.DB;
-  const body = await c.req.json().catch(() => ({}));
-  const { email, full_name, password, phone } = body;
-
-  if (!email || !full_name || !password) {
-    throw new AppError('Missing required fields: email, full_name, password', 'VALIDATION_ERROR', 400);
-  }
-
-  assertPasswordPolicy(password);
-
-  if (!emailRegex.test(email)) {
-    throw new AppError('Invalid email format', 'VALIDATION_ERROR', 400);
-  }
-
-  const totalUsersResult = await db.prepare('SELECT COUNT(*) as count FROM users').first<{ count: number }>();
-  const isFirstUser = !totalUsersResult || totalUsersResult.count === 0;
-
-  if (!isFirstUser) {
-    throw new AppError(
-      'Public staff signup is disabled. Accounts are provisioned by Super Admin, Department Head, or Coordinator.',
-      'SIGNUP_DISABLED',
-      403
-    );
-  }
-
-  const existingUser = await db.prepare('SELECT id FROM users WHERE email = ?').bind(email.toLowerCase()).first();
-  if (existingUser) {
-    throw new AppError('A user with this email already exists', 'EMAIL_EXISTS', 409);
-  }
-
-  const userId = generateUUID();
-  const hashedPassword = await hashPassword(password);
-
-  await db
-    .prepare(
-      `INSERT INTO users (id, email, password_hash, full_name, phone, role, status, password_set)
-       VALUES (?, ?, ?, ?, ?, 'super_admin', 'active', 1)`
-    )
-    .bind(userId, email.toLowerCase(), hashedPassword, full_name, phone || null)
-    .run();
-
-  await logAudit(
-    db,
-    userId,
-    email.toLowerCase(),
-    'BOOTSTRAP_SUPER_ADMIN',
-    'user',
-    userId,
-    { role: 'super_admin' },
-    c.req.header('CF-Connecting-IP')
-  );
-
-  return c.json({
-    success: true,
-    data: {
-      userId,
-      email: email.toLowerCase(),
-      full_name,
-      role: 'super_admin',
-      status: 'active'
-    }
-  });
+auth.post('/register', rateLimit('auth', limits.auth), async () => {
+  throw new AppError('Public signup is disabled. Staff accounts are provisioned by the role hierarchy.', 'SIGNUP_DISABLED', 403);
 });
 
 auth.post('/setup-password', rateLimit('auth', limits.auth), async (c) => {
@@ -126,8 +62,8 @@ auth.post('/login', rateLimit('auth', limits.auth), async (c) => {
     throw new AppError('Your account has been suspended. Please contact an administrator.', 'ACCOUNT_SUSPENDED', 403);
   }
 
-  if (user.status === 'invited' || user.status === 'pending') {
-    throw new AppError('Complete account setup using your invite link before logging in.', 'ACCOUNT_SETUP_REQUIRED', 403);
+  if (user.status !== 'active') {
+    throw new AppError('This account cannot log in.', 'ACCOUNT_INACTIVE', 403);
   }
 
   const isValid = await verifyPassword(password, user.password_hash);

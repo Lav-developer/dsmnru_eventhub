@@ -314,19 +314,24 @@ function testEventInsertBindingCount() {
 }
 
 function testSignupDoesNotTrustRole() {
-  console.log('\nRunning Test 9: Public signup cannot choose privileged roles...');
+  console.log('\nRunning Test 9: Public signup is fully disabled...');
   const src = readFileSync(resolve(process.cwd(), 'src/routes/auth.ts'), 'utf8');
-  if (src.includes("const allowedRoles = ['department_head', 'coordinator', 'volunteer']")) {
-    throw new Error('Public signup still accepts client-supplied staff roles');
+  if (!src.includes('SIGNUP_DISABLED')) {
+    throw new Error('POST /register must reject with SIGNUP_DISABLED');
   }
-  if (!src.includes('SIGNUP_DISABLED') || !src.includes("role: 'super_admin'")) {
-    throw new Error('Public signup must bootstrap first super admin only');
+  if (src.includes('BOOTSTRAP_SUPER_ADMIN') || src.includes('isFirstUser')) {
+    throw new Error('First-user Super Admin bootstrap must be removed');
   }
-  if (!src.includes('body.role') && src.includes('finalRole = isFirstUser')) {
-    throw new Error('legacy role assignment still present');
+  if (src.includes("VALUES (?, ?, ?, ?, ?, 'super_admin'")) {
+    throw new Error('Register must not create Super Admin accounts');
   }
-  if (src.includes('const { email, full_name, password, phone, role }')) {
-    throw new Error('Register still destructures role from client');
+  const staff = readFileSync(resolve(process.cwd(), 'src/routes/staff.ts'), 'utf8');
+  if (staff.includes("role: 'super_admin'") && staff.includes('createProvisionedUser')) {
+    throw new Error('Staff provisioning must never create Super Admin');
+  }
+  const admin = readFileSync(resolve(process.cwd(), 'src/routes/admin.ts'), 'utf8');
+  if (admin.includes("['super_admin', 'department_head', 'coordinator', 'volunteer']")) {
+    throw new Error('Admin role API must not allow assigning super_admin');
   }
   console.log('✅ Test 9 Passed!');
 }
@@ -366,22 +371,24 @@ function testMigrationsDoNotDuplicatePasswordSet() {
   console.log('✅ Test 13 Passed!');
 }
 
-function testProvisionedUsersStartInvited() {
-  console.log('\nRunning Test 14: Provisioned staff start as invited until setup...');
+function testProvisionedUsersStartActive() {
+  console.log('\nRunning Test 14: Provisioned staff are active immediately; setup-password remains...');
   const staff = readFileSync(resolve(process.cwd(), 'src/routes/staff.ts'), 'utf8');
-  if (staff.includes("status: 'active'") && staff.includes('createProvisionedUser')) {
-    const creates = staff.match(/createProvisionedUser\([\s\S]*?status: '(\w+)'/g) || [];
-    for (const block of creates) {
-      if (block.includes("status: 'active'")) {
-        throw new Error('Provisioned users must be invited, not active, before password setup');
-      }
-    }
+  if (!staff.includes("opts.status || 'active'")) {
+    throw new Error('createProvisionedUser default status must be active');
   }
-  if (!staff.includes("status: 'invited'")) {
-    throw new Error('staff provisioning must set invited');
+  if (!staff.includes('createSetupToken')) {
+    throw new Error('Provisioned users must still receive a setup token');
   }
-  if (!staff.includes("opts.status || 'invited'")) {
-    throw new Error('createProvisionedUser default status must be invited');
+  if (!staff.includes("requireRoles(actor, ['department_head'])")) {
+    throw new Error('Only Department Head may create coordinators');
+  }
+  if (!staff.includes("requireRoles(actor, ['coordinator'])")) {
+    throw new Error('Only Coordinator may create volunteers');
+  }
+  const auth = readFileSync(resolve(process.cwd(), 'src/routes/auth.ts'), 'utf8');
+  if (!auth.includes('consumeSetupToken')) {
+    throw new Error('setup-password flow must remain');
   }
   console.log('✅ Test 14 Passed!');
 }
@@ -469,7 +476,7 @@ async function main() {
   testCoordinatorCreateAllowedInRoute();
   testSchemaRelationships();
   testMigrationsDoNotDuplicatePasswordSet();
-  testProvisionedUsersStartInvited();
+  testProvisionedUsersStartActive();
   await testSetupTokenSingleUseAndExpiry();
   await testFullHierarchyAuthorization();
   console.log('\n==================================================');
