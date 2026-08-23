@@ -23,6 +23,7 @@ export async function apiRequest<T = any>(
   }
 
   const res = await fetch(url, {
+    credentials: 'include', // Always send and receive cookies
     ...options,
     headers
   });

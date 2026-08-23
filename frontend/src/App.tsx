@@ -2599,6 +2599,63 @@ function EventTabRegistrations({ event }: { event: Event }) {
   );
 }
 
+// Helper to parse RFC-4180 CSV safely client-side
+function parseCSV(text: string): { headers: string[]; rows: Record<string, string>[] } {
+  const lines: string[][] = [];
+  let row: string[] = [];
+  let cell = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    const nextChar = text[i + 1];
+
+    if (char === '"') {
+      if (inQuotes && nextChar === '"') {
+        cell += '"';
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (char === ',' && !inQuotes) {
+      row.push(cell.trim());
+      cell = '';
+    } else if ((char === '\r' || char === '\n') && !inQuotes) {
+      if (char === '\r' && nextChar === '\n') {
+        i++;
+      }
+      row.push(cell.trim());
+      if (row.length > 1 || row[0] !== '') {
+        lines.push(row);
+      }
+      row = [];
+      cell = '';
+    } else {
+      cell += char;
+    }
+  }
+
+  if (cell || row.length > 0) {
+    row.push(cell.trim());
+    lines.push(row);
+  }
+
+  if (lines.length === 0) {
+    return { headers: [], rows: [] };
+  }
+
+  const headers = lines[0];
+  const rows = lines.slice(1).map((r) => {
+    const obj: Record<string, string> = {};
+    headers.forEach((h, idx) => {
+      obj[h] = r[idx] || '';
+    });
+    return obj;
+  });
+
+  return { headers, rows };
+}
+
 // ==========================================
 // EVENT TAB: CSV REPEATED IMPORTS SHEET PORTAL
 // ==========================================
@@ -2622,6 +2679,22 @@ function EventTabImport({ event }: { event: Event }) {
   const [headers, setHeaders] = useState<string[]>([]);
   const [success, setSuccess] = useState<any>(null);
 
+  const getMappedParticipants = () => {
+    const { rows } = parseCSV(csvText);
+    return rows.map((row) => {
+      return {
+        full_name: row[mapping.full_name] || '',
+        email: row[mapping.email] || '',
+        phone: row[mapping.phone] || '',
+        college: row[mapping.college] || '',
+        department: row[mapping.department] || '',
+        course: row[mapping.course] || '',
+        year: row[mapping.year] || '',
+        designation: row[mapping.designation] || 'Student'
+      };
+    });
+  };
+
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -2636,12 +2709,9 @@ function EventTabImport({ event }: { event: Event }) {
       const text = evt.target?.result as string;
       setCsvText(text);
 
-      // Parse headers
-      const lines = text.split(/\r?\n/);
-      if (lines.length > 0) {
-        const firstLine = lines[0];
-        // Standard split, let's keep it simple
-        const cols = firstLine.split(',').map((c) => c.replace(/"/g, '').trim());
+      // Parse headers with client-side RFC-4180 parser
+      const { headers: cols } = parseCSV(text);
+      if (cols.length > 0) {
         setHeaders(cols);
 
         // Intelligently auto-map standard headers
@@ -2675,9 +2745,13 @@ function EventTabImport({ event }: { event: Event }) {
     setSuccess(null);
 
     try {
+      const participants = getMappedParticipants();
+      if (participants.length > 1000) {
+        throw new Error('Spreadsheet exceeds maximum limit of 1000 rows. Please split into smaller batches.');
+      }
       const data = await apiRequest<any>(`/registrations/events/${event.id}/registrations/import-preview`, {
         method: 'POST',
-        body: JSON.stringify({ csvText, mapping })
+        body: JSON.stringify({ participants })
       });
       setPreview(data);
     } catch (err: any) {
@@ -2693,9 +2767,10 @@ function EventTabImport({ event }: { event: Event }) {
     setError(null);
 
     try {
+      const participants = getMappedParticipants();
       const data = await apiRequest<any>(`/registrations/events/${event.id}/registrations/import-commit`, {
         method: 'POST',
-        body: JSON.stringify({ csvText, mapping, filename })
+        body: JSON.stringify({ participants, filename })
       });
       setSuccess(data);
       setPreview(null);

@@ -3,6 +3,7 @@ export interface Env {
   JWT_SECRET: string;
   ENV: string;
   RESEND_API_KEY?: string;
+  FRONTEND_URL?: string;
 }
 
 export type UserRole = 'super_admin' | 'department_head' | 'coordinator' | 'volunteer';

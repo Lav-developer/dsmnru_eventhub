@@ -17,6 +17,14 @@ auth.post('/register', rateLimit('auth', limits.auth), async (c) => {
     throw new AppError('Missing required fields: email, full_name, password, role', 'VALIDATION_ERROR', 400);
   }
 
+  // Strict Password Policy
+  if (password.length < 8) {
+    throw new AppError('Password must be at least 8 characters long', 'VALIDATION_ERROR', 400);
+  }
+  if (password.length > 100) {
+    throw new AppError('Password is too long (maximum 100 characters)', 'VALIDATION_ERROR', 400);
+  }
+
   // Validate email format
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   if (!emailRegex.test(email)) {
@@ -89,13 +97,17 @@ auth.post('/login', rateLimit('auth', limits.auth), async (c) => {
     throw new AppError('Missing email or password', 'VALIDATION_ERROR', 400);
   }
 
+  if (password.length > 100) {
+    throw new AppError('Password is too long', 'VALIDATION_ERROR', 400);
+  }
+
   const user = await db
     .prepare('SELECT id, email, password_hash, full_name, role, status FROM users WHERE email = ?')
     .bind(email.toLowerCase())
     .first<any>();
 
   if (!user) {
-    // Audit failed attempt (avoid user enumeration by returning generic error)
+    // Avoid user enumeration by returning generic error
     throw new AppError('Invalid email or password', 'INVALID_CREDENTIALS', 401);
   }
 
@@ -148,7 +160,6 @@ auth.post('/login', rateLimit('auth', limits.auth), async (c) => {
   return c.json({
     success: true,
     data: {
-      token: sessionToken,
       user: {
         id: user.id,
         email: user.email,

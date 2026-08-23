@@ -41,6 +41,20 @@ function hex2buf(hex: string): ArrayBuffer {
 }
 
 /**
+ * Constant-time string comparison to prevent timing attacks
+ */
+export function constantTimeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) {
+    return false;
+  }
+  let result = 0;
+  for (let i = 0; i < a.length; i++) {
+    result |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return result === 0;
+}
+
+/**
  * PBKDF2 Password Hashing
  * Format: pbkdf2_sha256$<iterations>$<salt_hex>$<hash_hex>
  */
@@ -105,7 +119,7 @@ export async function verifyPassword(password: string, storedHash: string): Prom
     );
 
     const verifyHex = buf2hex(derivedKeyBuffer);
-    return verifyHex === hashHex;
+    return constantTimeEqual(verifyHex, hashHex);
   } catch (err) {
     console.error('Password verification error:', err);
     return false;

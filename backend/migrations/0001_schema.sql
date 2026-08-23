@@ -303,6 +303,13 @@ CREATE TABLE IF NOT EXISTS sessions (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- 27. rate_limit_records
+CREATE TABLE IF NOT EXISTS rate_limit_records (
+  key TEXT PRIMARY KEY,
+  count INTEGER NOT NULL,
+  reset_time INTEGER NOT NULL
+);
+
 -- Create Indexes for performance and unique lookups
 CREATE INDEX IF NOT EXISTS idx_events_slug ON events(slug);
 CREATE INDEX IF NOT EXISTS idx_registrations_event_id_email ON event_registrations(event_id, email);
@@ -312,3 +319,4 @@ CREATE INDEX IF NOT EXISTS idx_resource_claims_lookup ON resource_claims(event_i
 CREATE INDEX IF NOT EXISTS idx_certificate_records_id ON certificate_records(id);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp ON audit_logs(timestamp);
 CREATE INDEX IF NOT EXISTS idx_email_queue_status_retry ON email_queue(status, next_retry);
+CREATE INDEX IF NOT EXISTS idx_rate_limit_reset ON rate_limit_records(reset_time);
