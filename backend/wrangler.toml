@@ -1,0 +1,14 @@
+name = "dsmnru-eventhub-api"
+main = "src/index.ts"
+compatibility_date = "2024-10-22"
+
+[vars]
+# For local dev, Hono or Wrangler will read these.
+# In production, we'll set secrets (like JWT_SECRET, RESEND_API_KEY) via wrangler secrets.
+ENV = "development"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "dsmnru-eventhub-db"
+database_id = "local-d1-db"
+migrations_dir = "migrations"
