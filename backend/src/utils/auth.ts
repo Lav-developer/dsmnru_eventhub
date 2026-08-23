@@ -59,6 +59,9 @@ export async function authenticate(c: Context<HonoTypes>, next: Next) {
       .first<any>();
 
     if (!user || user.status !== 'active') {
+      if (user && user.status === 'suspended') {
+        await db.prepare('DELETE FROM sessions WHERE user_id = ?').bind(user.id).run();
+      }
       c.set('user', null);
       c.set('session', null);
       return await next();

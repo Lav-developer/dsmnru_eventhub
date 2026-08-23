@@ -122,7 +122,7 @@ departments.delete('/:id', requireAuth(['super_admin']), async (c) => {
     throw new AppError('Department not found', 'NOT_FOUND', 404);
   }
 
-  await db.prepare('DELETE FROM departments WHERE id = ?').bind(id).run();
+  await db.prepare("UPDATE departments SET status = 'inactive' WHERE id = ?").bind(id).run();
 
   await logAudit(
     db,

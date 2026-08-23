@@ -147,6 +147,7 @@ admin.put('/users/:id/role', async (c) => {
   }
 
   await db.prepare('UPDATE users SET role = ?, updated_at = datetime(\'now\') WHERE id = ?').bind(role, targetUserId).run();
+  await db.prepare('DELETE FROM sessions WHERE user_id = ?').bind(targetUserId).run();
 
   await logAudit(
     db,

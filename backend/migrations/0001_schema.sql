@@ -8,7 +8,8 @@ CREATE TABLE IF NOT EXISTS users (
   full_name TEXT NOT NULL,
   phone TEXT,
   role TEXT NOT NULL CHECK(role IN ('super_admin', 'department_head', 'coordinator', 'volunteer')),
-  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'active', 'suspended')),
+  status TEXT NOT NULL DEFAULT 'invited' CHECK(status IN ('pending', 'invited', 'active', 'suspended')),
+  password_set INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -19,6 +20,7 @@ CREATE TABLE IF NOT EXISTS departments (
   name TEXT UNIQUE NOT NULL,
   code TEXT UNIQUE NOT NULL,
   description TEXT,
+  status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'inactive')),
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -61,6 +63,22 @@ CREATE TABLE IF NOT EXISTS event_members (
   user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
   role TEXT NOT NULL CHECK(role IN ('coordinator', 'volunteer')),
   PRIMARY KEY (event_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS volunteer_event_permissions (
+  event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  permission TEXT NOT NULL CHECK(permission IN ('SCAN_ATTENDANCE', 'SCAN_RESOURCE')),
+  PRIMARY KEY (event_id, user_id, permission)
+);
+
+CREATE TABLE IF NOT EXISTS account_setup_tokens (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token_hash TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  used_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 -- 6. registration_fields

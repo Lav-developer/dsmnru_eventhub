@@ -15,6 +15,7 @@ import announcementsRouter from './routes/announcements';
 import operationsRouter from './routes/operations';
 import certificatesRouter from './routes/certificates';
 import emailsRouter from './routes/emails';
+import staffRouter from './routes/staff';
 
 const app = new Hono<HonoTypes>();
 
@@ -168,6 +169,7 @@ apiV1.route('/announcements', announcementsRouter);
 apiV1.route('/operations', operationsRouter);
 apiV1.route('/certificates', certificatesRouter);
 apiV1.route('/emails', emailsRouter);
+apiV1.route('/staff', staffRouter);
 
 app.route('/api/v1', apiV1);
 

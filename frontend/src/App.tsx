@@ -233,11 +233,8 @@ export default function App() {
                   </div>
                 ) : (
                   <div className="flex items-center space-x-3">
-                    <Link to="/login" className="text-slate-600 hover:text-primary-600 px-3 py-2 text-sm font-semibold transition">
-                      Coordinator Login
-                    </Link>
-                    <Link to="/register" className="bg-primary-600 text-white hover:bg-primary-700 px-4 py-2 rounded-md text-sm font-semibold shadow-sm transition">
-                      Sign Up
+                    <Link to="/login" className="bg-primary-600 text-white hover:bg-primary-700 px-4 py-2 rounded-md text-sm font-semibold shadow-sm transition">
+                      Staff Login
                     </Link>
                   </div>
                 )}
@@ -252,6 +249,7 @@ export default function App() {
             <Route path="/" element={<Home />} />
             <Route path="/login" element={<Login setCurrentUser={setCurrentUser} />} />
             <Route path="/register" element={<Register />} />
+            <Route path="/setup-password" element={<SetupPassword />} />
             <Route path="/events/:slug" element={<EventPage />} />
             <Route path="/verify/:certificateId" element={<CertificateVerifyPage />} />
             <Route path="/dashboard/*" element={currentUser ? <Dashboard currentUser={currentUser} /> : <Link to="/login" />} />
@@ -561,8 +559,8 @@ function Login({ setCurrentUser }: { setCurrentUser: (user: User | null) => void
       <div className="max-w-md w-full bg-white border border-slate-200 rounded-2xl shadow-sm p-8 space-y-6">
         <div className="text-center space-y-2">
           <span className="text-4xl block">🔑</span>
-          <h2 className="text-2xl font-extrabold text-slate-800">DSMNRU Coordinator Login</h2>
-          <p className="text-sm text-slate-500">Access your department events coordination dashboard</p>
+          <h2 className="text-2xl font-extrabold text-slate-800">DSMNRU Staff Login</h2>
+          <p className="text-sm text-slate-500">Provisioned Super Admin, Department Head, Coordinator, and Volunteer accounts</p>
         </div>
 
         {error && (
@@ -611,11 +609,7 @@ function Login({ setCurrentUser }: { setCurrentUser: (user: User | null) => void
           </button>
         </form>
 
-        <div className="text-center pt-2">
-          <Link to="/register" className="text-xs font-semibold text-primary-600 hover:text-primary-700">
-            Request an academic coordinator account &rarr;
-          </Link>
-        </div>
+        <p className="text-center text-xs text-slate-400">Staff accounts are provisioned by the role hierarchy. Participants register on event pages only.</p>
       </div>
     </div>
   );
@@ -624,19 +618,59 @@ function Login({ setCurrentUser }: { setCurrentUser: (user: User | null) => void
 // ==========================================
 // PAGE: REGISTER ACCOUNT
 // ==========================================
-function Register() {
-  const [email, setEmail] = useState('');
-  const [fullName, setFullName] = useState('');
+function SetupPassword() {
+  const [searchParams] = useSearchParams();
+  const token = searchParams.get('token') || '';
   const [password, setPassword] = useState('');
-  const [phone, setPhone] = useState('');
-  const [role, setRole] = useState('coordinator');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!email || !fullName || !password || !role) return;
+    setLoading(true);
+    setError(null);
+    try {
+      await apiRequest('/auth/setup-password', {
+        method: 'POST',
+        body: JSON.stringify({ token, password })
+      });
+      setSuccess('Password set. You can now log in.');
+    } catch (err: any) {
+      setError(err.message || 'Setup failed');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-50 flex items-center justify-center py-12 px-4">
+      <div className="max-w-md w-full bg-white border border-slate-200 rounded-2xl shadow-sm p-8 space-y-6">
+        <h2 className="text-2xl font-extrabold text-slate-800 text-center">Set your password</h2>
+        {error && <p className="text-sm text-red-600">{error}</p>}
+        {success && <p className="text-sm text-green-700">{success}</p>}
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <input type="password" required value={password} onChange={(e) => setPassword(e.target.value)} placeholder="New password (8+ characters)" className="w-full px-4 py-2.5 rounded-lg border border-slate-300 text-sm" />
+          <button type="submit" disabled={loading} className="w-full bg-primary-600 text-white py-3 rounded-lg font-bold text-sm">Save password</button>
+        </form>
+        <Link to="/login" className="block text-center text-xs text-primary-600">Go to login</Link>
+      </div>
+    </div>
+  );
+}
+
+function Register() {
+  const [email, setEmail] = useState('');
+  const [fullName, setFullName] = useState('');
+  const [password, setPassword] = useState('');
+  const [phone, setPhone] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!email || !fullName || !password) return;
 
     setLoading(true);
     setError(null);
@@ -649,11 +683,10 @@ function Register() {
           email,
           full_name: fullName,
           password,
-          phone,
-          role
+          phone
         })
       });
-      setSuccess('Account requested successfully! Please wait for a Super Admin to review and approve your credentials.');
+      setSuccess('Bootstrap Super Admin created. Staff accounts must be provisioned from the portal.');
       setEmail('');
       setFullName('');
       setPassword('');
@@ -671,7 +704,7 @@ function Register() {
         <div className="text-center space-y-2">
           <span className="text-4xl block">🎓</span>
           <h2 className="text-2xl font-extrabold text-slate-800">DSMNRU Account Sign Up</h2>
-          <p className="text-sm text-slate-500">Request coordinator, department head, or volunteer credentials</p>
+          <p className="text-sm text-slate-500">First-user bootstrap only. Role cannot be chosen. Public staff signup is disabled.</p>
         </div>
 
         {error && (
@@ -729,20 +762,8 @@ function Register() {
               value={phone}
               onChange={(e) => setPhone(e.target.value)}
               placeholder="e.g. 9876543210"
-              className="w-full px-4 py-2.5 rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent text-slate-800 text-sm"
+              className="w-full px-4 py-2.5 rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:bot-slate-800 text-sm"
             />
-          </div>
-          <div className="space-y-1">
-            <label className="block text-xs font-bold uppercase tracking-wider text-slate-500">Requested Account Role</label>
-            <select
-              value={role}
-              onChange={(e) => setRole(e.target.value)}
-              className="w-full px-4 py-2.5 rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent text-slate-800 text-sm"
-            >
-              <option value="coordinator">Event Coordinator</option>
-              <option value="department_head">Department Head</option>
-              <option value="volunteer">Volunteer Scanner</option>
-            </select>
           </div>
           <button
             type="submit"
@@ -1302,11 +1323,10 @@ function Dashboard({ currentUser }: { currentUser: User }) {
           <p className="text-[10px] text-slate-500 mt-1 capitalize">Role: {currentUser.role.replace('_', ' ')}</p>
         </div>
         <div className="flex-grow p-4 space-y-2 text-sm">
-          {currentUser.role === 'super_admin' ? (
-            <AdminMenu />
-          ) : (
-            <CoordinatorMenu />
-          )}
+          {currentUser.role === 'super_admin' && <AdminMenu />}
+          {currentUser.role === 'department_head' && <DeptHeadMenu />}
+          {currentUser.role === 'coordinator' && <CoordinatorMenu />}
+          {currentUser.role === 'volunteer' && <VolunteerMenu />}
         </div>
       </aside>
 
@@ -1317,8 +1337,9 @@ function Dashboard({ currentUser }: { currentUser: User }) {
           <Route path="/departments" element={<AdminDepartments />} />
           <Route path="/users" element={<AdminUsers />} />
           <Route path="/health" element={<AdminHealth />} />
-          <Route path="/create-event" element={<CreateEventWizard />} />
-          <Route path="/event-manager/:eventId/*" element={<EventManager />} />
+          <Route path="/create-event" element={currentUser.role === 'volunteer' ? <ForbiddenNote /> : <CreateEventWizard />} />
+          <Route path="/coordinators" element={<DeptCoordinators currentUser={currentUser} />} />
+          <Route path="/event-manager/:eventId/*" element={<EventManager currentUser={currentUser} />} />
         </Routes>
       </div>
     </div>
@@ -1353,12 +1374,87 @@ function CoordinatorMenu() {
     <div className="space-y-1">
       <Link to="/dashboard" className="flex items-center space-x-3 px-3 py-2 rounded-lg hover:bg-slate-800 text-slate-300 transition">
         <Calendar className="w-4 h-4 text-primary-400" />
-        <span>Assigned Events</span>
+        <span>Events</span>
       </Link>
       <Link to="/dashboard/create-event" className="flex items-center space-x-3 px-3 py-2 rounded-lg hover:bg-slate-800 text-slate-300 transition">
         <Plus className="w-4 h-4 text-primary-400" />
         <span>Create Event</span>
       </Link>
+    </div>
+  );
+}
+
+function DeptHeadMenu() {
+  return (
+    <div className="space-y-1">
+      <Link to="/dashboard" className="flex items-center space-x-3 px-3 py-2 rounded-lg hover:bg-slate-800 text-slate-300 transition">
+        <Calendar className="w-4 h-4 text-primary-400" />
+        <span>Department Events</span>
+      </Link>
+      <Link to="/dashboard/create-event" className="flex items-center space-x-3 px-3 py-2 rounded-lg hover:bg-slate-800 text-slate-300 transition">
+        <Plus className="w-4 h-4 text-primary-400" />
+        <span>Create Event</span>
+      </Link>
+      <Link to="/dashboard/coordinators" className="flex items-center space-x-3 px-3 py-2 rounded-lg hover:bg-slate-800 text-slate-300 transition">
+        <Users className="w-4 h-4 text-primary-400" />
+        <span>Coordinators</span>
+      </Link>
+    </div>
+  );
+}
+
+function VolunteerMenu() {
+  return (
+    <div className="space-y-1">
+      <Link to="/dashboard" className="flex items-center space-x-3 px-3 py-2 rounded-lg hover:bg-slate-800 text-slate-300 transition">
+        <QrCode className="w-4 h-4 text-primary-400" />
+        <span>My Events / Scanner</span>
+      </Link>
+    </div>
+  );
+}
+
+function ForbiddenNote() {
+  return <div className="bg-red-50 border border-red-200 rounded-xl p-6 text-red-700 text-sm font-semibold">403 — Volunteers cannot create events.</div>;
+}
+
+function DeptCoordinators({ currentUser }: { currentUser: User }) {
+  const [email, setEmail] = useState('');
+  const [fullName, setFullName] = useState('');
+  const [token, setToken] = useState<string | null>(null);
+  const [list, setList] = useState<any[]>([]);
+
+  const load = () => {
+    apiRequest<any[]>('/staff/coordinators').then((d) => setList(d || [])).catch(() => {});
+  };
+  useEffect(() => { load(); }, []);
+
+  if (currentUser.role !== 'department_head' && currentUser.role !== 'super_admin') {
+    return <ForbiddenNote />;
+  }
+
+  return (
+    <div className="space-y-6">
+      <h1 className="text-2xl font-extrabold text-slate-800">Coordinators</h1>
+      <form
+        className="bg-white border rounded-xl p-6 space-y-3 max-w-lg"
+        onSubmit={async (e) => {
+          e.preventDefault();
+          const res = await apiRequest<any>('/staff/coordinators', { method: 'POST', body: JSON.stringify({ email, full_name: fullName }) });
+          setToken(res.setup_token);
+          setEmail('');
+          setFullName('');
+          load();
+        }}
+      >
+        <input className="w-full border rounded px-3 py-2 text-sm" placeholder="Full name" value={fullName} onChange={(e) => setFullName(e.target.value)} required />
+        <input className="w-full border rounded px-3 py-2 text-sm" placeholder="Email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
+        <button className="bg-primary-600 text-white text-xs font-bold px-4 py-2 rounded">Create coordinator</button>
+        {token && <p className="text-xs text-slate-600">Setup link: /setup-password?token={token}</p>}
+      </form>
+      <ul className="text-sm space-y-2">
+        {list.map((u) => <li key={u.id} className="bg-white border rounded p-3">{u.full_name} — {u.email} ({u.status})</li>)}
+      </ul>
     </div>
   );
 }
@@ -1412,10 +1508,12 @@ function DashboardOverview({ currentUser }: { currentUser: User }) {
         <div className="space-y-6">
           <div className="flex justify-between items-center border-b pb-4">
             <h2 className="text-xl font-bold text-slate-800">Managed Academic Events</h2>
+            {currentUser.role !== 'volunteer' && (
             <Link to="/dashboard/create-event" className="bg-primary-600 hover:bg-primary-700 text-white px-4 py-2 rounded-lg text-sm font-bold shadow-sm transition flex items-center space-x-1.5">
               <Plus className="w-4 h-4" />
               <span>Create Event Wizard</span>
             </Link>
+            )}
           </div>
 
           {loading ? (
@@ -1615,6 +1713,11 @@ function AdminDepartments() {
 function AdminUsers() {
   const [users, setUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
+  const [dhName, setDhName] = useState('');
+  const [dhEmail, setDhEmail] = useState('');
+  const [dhDept, setDhDept] = useState('');
+  const [depts, setDepts] = useState<Department[]>([]);
+  const [setupTok, setSetupTok] = useState<string | null>(null);
 
   const fetchUsers = () => {
     setLoading(true);
@@ -1656,8 +1759,31 @@ function AdminUsers() {
     <div className="space-y-8">
       <div>
         <h1 className="text-3xl font-extrabold text-slate-800">Coordinator Directory</h1>
-        <p className="text-slate-500">Approve pending coordinator accounts, modify roles, or suspend abusive users.</p>
+        <p className="text-slate-500">Provision Department Heads. Staff cannot self-register into privileged roles.</p>
       </div>
+
+      <form
+        className="bg-white border rounded-xl p-6 grid grid-cols-1 md:grid-cols-4 gap-3 items-end"
+        onSubmit={async (e) => {
+          e.preventDefault();
+          const res = await apiRequest<any>('/staff/department-heads', {
+            method: 'POST',
+            body: JSON.stringify({ email: dhEmail, full_name: dhName, department_id: dhDept })
+          });
+          setSetupTok(res.setup_token);
+          setDhName('');
+          setDhEmail('');
+          fetchUsers();
+        }}
+      >
+        <input className="border rounded px-3 py-2 text-sm" placeholder="Head name" value={dhName} onChange={(e) => setDhName(e.target.value)} required />
+        <input className="border rounded px-3 py-2 text-sm" placeholder="Email" type="email" value={dhEmail} onChange={(e) => setDhEmail(e.target.value)} required />
+        <select className="border rounded px-3 py-2 text-sm" value={dhDept} onChange={(e) => setDhDept(e.target.value)}>
+          {depts.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+        </select>
+        <button className="bg-primary-600 text-white text-xs font-bold px-4 py-2 rounded">Create Department Head</button>
+        {setupTok && <p className="md:col-span-4 text-xs">Setup: /setup-password?token={setupTok}</p>}
+      </form>
 
       <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
         {loading ? (
@@ -1979,8 +2105,9 @@ function CreateEventWizard() {
               </select>
             </div>
           </div>
+          <p className="text-xs text-slate-500">Department is assigned by the server from your membership. Super Admin may pick a department.</p>
           <div className="space-y-1">
-            <label className="block text-xs font-bold uppercase text-slate-500">Department</label>
+            <label className="block text-xs font-bold uppercase text-slate-500">Department (Super Admin only)</label>
             <select
               value={deptId}
               onChange={(e) => setDeptId(e.target.value)}
@@ -2217,7 +2344,7 @@ function CreateEventWizard() {
 // ==========================================
 // CENTRAL MANAGER: EVENT COORDINATOR TABS
 // ==========================================
-function EventManager() {
+function EventManager({ currentUser }: { currentUser: User }) {
   const { eventId } = useParams<{ eventId: string }>();
   const [event, setEvent] = useState<Event | null>(null);
   const [activeTab, setActiveTab] = useState('overview');
@@ -2291,9 +2418,10 @@ function EventManager() {
     { id: 'panel', label: 'Panelist Speakers', icon: Briefcase },
     { id: 'bulletins', label: 'Bulletins / Alerts', icon: Mail },
     { id: 'scanners', label: 'Real-Time Scanners', icon: QrCode },
+    { id: 'volunteers', label: 'Volunteers', icon: UserPlus },
     { id: 'certificates', label: 'Certificates bulk', icon: FileText },
     { id: 'campaigns', label: 'Email Analytics', icon: Mail }
-  ];
+  ].filter((tab) => currentUser.role !== 'volunteer' || tab.id === 'scanners');
 
   return (
     <div className="space-y-8">
@@ -2380,7 +2508,8 @@ function EventManager() {
         {activeTab === 'panel' && <EventTabPanel event={event} />}
         {activeTab === 'bulletins' && <EventTabBulletins event={event} />}
         {activeTab === 'scanners' && <EventTabScanners event={event} />}
-        {activeTab === 'certificates' && <EventTabCertificates event={event} />}
+        {activeTab === 'volunteers' && currentUser.role !== 'volunteer' && <EventTabVolunteers event={event} />}
+        {activeTab === 'certificates' && currentUser.role !== 'volunteer' && <EventTabCertificates event={event} />}
         {activeTab === 'campaigns' && <EventTabCampaigns event={event} />}
       </div>
     </div>
@@ -4359,6 +4488,58 @@ function EventTabCampaigns({ event }: { event: Event }) {
         </div>
       </div>
 
+    </div>
+  );
+}
+
+function EventTabVolunteers({ event }: { event: Event }) {
+  const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
+  const [phone, setPhone] = useState('');
+  const [scanAtt, setScanAtt] = useState(true);
+  const [scanRes, setScanRes] = useState(false);
+  const [token, setToken] = useState<string | null>(null);
+  const [list, setList] = useState<any[]>([]);
+
+  const load = () => {
+    apiRequest<any[]>(`/staff/volunteers?event_id=${event.id}`).then((d) => setList(d || [])).catch(() => {});
+  };
+  useEffect(() => { load(); }, [event.id]);
+
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <form
+        className="bg-white border rounded-xl p-6 space-y-3"
+        onSubmit={async (e) => {
+          e.preventDefault();
+          const permissions = [
+            ...(scanAtt ? ['SCAN_ATTENDANCE'] : []),
+            ...(scanRes ? ['SCAN_RESOURCE'] : [])
+          ];
+          const res = await apiRequest<any>('/staff/volunteers', {
+            method: 'POST',
+            body: JSON.stringify({ email, full_name: name, phone, event_id: event.id, permissions })
+          });
+          setToken(res.setup_token || null);
+          setName('');
+          setEmail('');
+          setPhone('');
+          load();
+        }}
+      >
+        <h2 className="font-bold text-slate-800">Add volunteer</h2>
+        <input className="w-full border rounded px-3 py-2 text-sm" placeholder="Name" value={name} onChange={(e) => setName(e.target.value)} required />
+        <input className="w-full border rounded px-3 py-2 text-sm" placeholder="Email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
+        <input className="w-full border rounded px-3 py-2 text-sm" placeholder="Phone (optional)" value={phone} onChange={(e) => setPhone(e.target.value)} />
+        <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={scanAtt} onChange={(e) => setScanAtt(e.target.checked)} /> SCAN_ATTENDANCE</label>
+        <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={scanRes} onChange={(e) => setScanRes(e.target.checked)} /> SCAN_RESOURCE</label>
+        <button className="bg-primary-600 text-white text-xs font-bold px-4 py-2 rounded">Create volunteer</button>
+        {token && <p className="text-xs">Setup: /setup-password?token={token}</p>}
+      </form>
+      <div className="bg-white border rounded-xl p-6">
+        <h3 className="font-bold text-sm mb-3">Assigned volunteers</h3>
+        <ul className="text-sm space-y-2">{list.map((v) => <li key={v.id}>{v.full_name} — {v.email}</li>)}</ul>
+      </div>
     </div>
   );
 }

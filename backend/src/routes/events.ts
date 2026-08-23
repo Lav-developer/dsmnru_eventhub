@@ -3,38 +3,14 @@ import { requireAuth } from '../utils/auth';
 import { AppError } from '../utils/errors';
 import { logAudit } from '../utils/audit';
 import { HonoTypes, User } from '../types';
+import {
+  authorizeCreateEvent,
+  authorizeEventAction,
+  checkEventAuthority,
+  getUserDepartmentId
+} from '../utils/authorize';
 
 const events = new Hono<HonoTypes>();
-
-// Helper to check user authority over an event
-async function checkEventAuthority(
-  db: D1Database,
-  userId: string | undefined,
-  role: string | undefined,
-  eventId: string | undefined
-): Promise<boolean> {
-  if (!userId || !role || !eventId) return false;
-  if (role === 'super_admin') return true;
-
-  // Check if user is department head of the event's department
-  const event = await db.prepare('SELECT department_id FROM events WHERE id = ?').bind(eventId).first<{ department_id: string }>();
-  if (!event) return false;
-
-  if (role === 'department_head') {
-    const isDeptHead = await db
-      .prepare('SELECT 1 FROM department_members WHERE department_id = ? AND user_id = ?')
-      .bind(event.department_id, userId)
-      .first();
-    if (isDeptHead) return true;
-  }
-
-  // Check if coordinator is explicitly assigned to this event
-  const isAssigned = await db
-    .prepare("SELECT 1 FROM event_members WHERE event_id = ? AND user_id = ? AND role = 'coordinator'")
-    .bind(eventId, userId)
-    .first();
-  return !!isAssigned;
-}
 
 // GET / - List events (Public with filter, or Authenticated for coordinators/etc.)
 events.get('/', async (c) => {
@@ -61,23 +37,26 @@ events.get('/', async (c) => {
   const countParams: any[] = [];
 
   // Filter public events if unauthorized/standard participant
-  if (!user || (user.role !== 'super_admin' && user.role !== 'department_head' && user.role !== 'coordinator')) {
+  if (!user) {
     query += " AND e.status != 'DRAFT'";
     countQuery += " AND e.status != 'DRAFT'";
+  } else if (user.role === 'volunteer') {
+    query += " AND e.id IN (SELECT event_id FROM event_members WHERE user_id = ? AND role = 'volunteer')";
+    countQuery += " AND id IN (SELECT event_id FROM event_members WHERE user_id = ? AND role = 'volunteer')";
+    params.push(user.id);
+    countParams.push(user.id);
   } else if (user.role === 'department_head') {
-    // Show draft events only for their department, or all published events
-    const deptResult = await db.prepare('SELECT department_id FROM department_members WHERE user_id = ?').first<{ department_id: string }>();
-    const deptId = deptResult?.department_id || '';
+    const deptId = (await getUserDepartmentId(db, user.id)) || '';
     query += " AND (e.status != 'DRAFT' OR e.department_id = ?)";
     countQuery += " AND (e.status != 'DRAFT' OR e.department_id = ?)";
     params.push(deptId);
     countParams.push(deptId);
   } else if (user.role === 'coordinator') {
-    // Show draft events if assigned as coordinator
-    query += " AND (e.status != 'DRAFT' OR e.id IN (SELECT event_id FROM event_members WHERE user_id = ?))";
-    countQuery += " AND (e.status != 'DRAFT' OR e.id IN (SELECT event_id FROM event_members WHERE user_id = ?))";
-    params.push(user.id);
-    countParams.push(user.id);
+    const deptId = (await getUserDepartmentId(db, user.id)) || '';
+    query += " AND (e.status != 'DRAFT' OR e.department_id = ? OR e.id IN (SELECT event_id FROM event_members WHERE user_id = ?))";
+    countQuery += " AND (e.status != 'DRAFT' OR e.department_id = ? OR e.id IN (SELECT event_id FROM event_members WHERE user_id = ?))";
+    params.push(deptId, user.id);
+    countParams.push(deptId, user.id);
   }
 
   if (search) {
@@ -170,8 +149,8 @@ events.get('/:slug_or_id', async (c) => {
   });
 });
 
-// POST / - Create Event (Super Admin / Dept Head)
-events.post('/', requireAuth(['super_admin', 'department_head']), async (c) => {
+// POST / - Create Event (Super Admin / Dept Head / Coordinator of own department)
+events.post('/', requireAuth(['super_admin', 'department_head', 'coordinator']), async (c) => {
   const db = c.env.DB;
   const user = c.get('user') as User;
   if (!user) {
@@ -197,19 +176,21 @@ events.post('/', requireAuth(['super_admin', 'department_head']), async (c) => {
     external_form_url
   } = body;
 
-  // Let's perform robust validation
   if (!name || !short_name || !event_type || !start_date || !end_date || !start_time || !end_time || !venue || !format || !registration_type) {
     throw new AppError('Missing required basic fields', 'VALIDATION_ERROR', 400);
   }
 
-  let departmentId = body.department_id;
-  if (user.role === 'department_head') {
-    const member = await db.prepare('SELECT department_id FROM department_members WHERE user_id = ?').first<{ department_id: string }>();
-    if (!member) {
-      throw new AppError('You are not associated with any department. Cannot create event.', 'FORBIDDEN', 403);
+  const derivedDepartment = await authorizeCreateEvent(db, user);
+  let departmentId = derivedDepartment;
+  if (user.role === 'super_admin') {
+    if (!body.department_id) {
+      throw new AppError('Missing department_id', 'VALIDATION_ERROR', 400);
     }
-    departmentId = member.department_id;
-  } else if (!departmentId) {
+    departmentId = body.department_id;
+  } else if (body.department_id && body.department_id !== departmentId) {
+    throw new AppError('Forbidden: Event department is derived from your assignment', 'FORBIDDEN', 403);
+  }
+  if (!departmentId) {
     throw new AppError('Missing department_id', 'VALIDATION_ERROR', 400);
   }
 
@@ -287,13 +268,10 @@ events.put('/:id', requireAuth(['super_admin', 'department_head', 'coordinator']
   if (!user) {
     throw new AppError('Unauthorized', 'UNAUTHORIZED', 401);
   }
-  const eventId = c.req.param('id');
+  const eventId = c.req.param('id') || '';
   const body = await c.req.json().catch(() => ({}));
 
-  const hasAuth = await checkEventAuthority(db, user.id, user.role, eventId);
-  if (!hasAuth) {
-    throw new AppError('Forbidden: You are not authorized to update this event', 'FORBIDDEN', 403);
-  }
+  await authorizeEventAction(db, user, eventId, 'manage_event');
 
   const {
     name,
@@ -380,7 +358,7 @@ events.put('/:id/status', requireAuth(['super_admin', 'department_head', 'coordi
   if (!user) {
     throw new AppError('Unauthorized', 'UNAUTHORIZED', 401);
   }
-  const eventId = c.req.param('id');
+  const eventId = c.req.param('id') || '';
   const body = await c.req.json().catch(() => ({}));
   const { status } = body;
 
@@ -388,10 +366,7 @@ events.put('/:id/status', requireAuth(['super_admin', 'department_head', 'coordi
     throw new AppError('Missing status in payload', 'VALIDATION_ERROR', 400);
   }
 
-  const hasAuth = await checkEventAuthority(db, user.id, user.role, eventId);
-  if (!hasAuth) {
-    throw new AppError('Forbidden: Access denied', 'FORBIDDEN', 403);
-  }
+  await authorizeEventAction(db, user, eventId, 'manage_event');
 
   const event = await db.prepare('SELECT status, name FROM events WHERE id = ?').bind(eventId).first<any>();
   if (!event) {
@@ -452,12 +427,9 @@ events.post('/:id/duplicate', requireAuth(['super_admin', 'department_head', 'co
   if (!user) {
     throw new AppError('Unauthorized', 'UNAUTHORIZED', 401);
   }
-  const eventId = c.req.param('id');
+  const eventId = c.req.param('id') || '';
 
-  const hasAuth = await checkEventAuthority(db, user.id, user.role, eventId);
-  if (!hasAuth) {
-    throw new AppError('Forbidden: Access denied', 'FORBIDDEN', 403);
-  }
+  await authorizeEventAction(db, user, eventId, 'manage_event');
 
   const original = await db.prepare('SELECT * FROM events WHERE id = ?').bind(eventId).first<any>();
   if (!original) {
