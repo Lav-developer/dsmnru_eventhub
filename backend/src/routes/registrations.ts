@@ -184,7 +184,7 @@ registrations.post('/events/:id/register', rateLimit('registration', limits.regi
 });
 
 // 2. COORDINATOR ENDPOINT: List/Search registrations
-registrations.get('/events/:id/registrations', requireAuth(['super_admin', 'department_head', 'coordinator', 'volunteer']), async (c) => {
+registrations.get('/events/:id/registrations', requireAuth(['super_admin', 'department_head', 'coordinator']), async (c) => {
   const db = c.env.DB;
   const user = c.get('user') as User;
   if (!user) {
@@ -198,12 +198,9 @@ registrations.get('/events/:id/registrations', requireAuth(['super_admin', 'depa
 
   const offset = (page - 1) * limit;
 
-  // Volunteer can lookup participants but coordinator check is strict
-  if (user.role !== 'super_admin' && user.role !== 'volunteer') {
-    const hasAuth = await checkEventAuthority(db, user.id, user.role, eventId);
-    if (!hasAuth) {
-      throw new AppError('Forbidden: Access denied', 'FORBIDDEN', 403);
-    }
+  const hasAuth = await checkEventAuthority(db, user.id, user.role, eventId);
+  if (!hasAuth) {
+    throw new AppError('Forbidden: Access denied', 'FORBIDDEN', 403);
   }
 
   let query = 'SELECT id, registration_id, full_name, email, phone, college, department, course, year, designation, created_at FROM event_registrations WHERE event_id = ?';

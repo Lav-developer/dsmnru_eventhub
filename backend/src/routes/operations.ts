@@ -4,35 +4,11 @@ import { AppError } from '../utils/errors';
 import { logAudit } from '../utils/audit';
 import { rateLimit, limits } from '../utils/rateLimit';
 import { HonoTypes, User } from '../types';
+import { authorizeEventAction } from '../utils/authorize';
 
 const operations = new Hono<HonoTypes>();
 
-// Apply coordinator or volunteer auth to operations
 operations.use('*', requireAuth(['super_admin', 'department_head', 'coordinator', 'volunteer']));
-
-// Helper to check scanner permissions for an event
-async function checkScannerAuthority(db: D1Database, userId: string, role: string, eventId: string): Promise<boolean> {
-  if (role === 'super_admin') return true;
-
-  // Check if coordinator is head of the department
-  if (role === 'department_head') {
-    const event = await db.prepare('SELECT department_id FROM events WHERE id = ?').bind(eventId).first<{ department_id: string }>();
-    if (event) {
-      const isDeptHead = await db
-        .prepare('SELECT 1 FROM department_members WHERE department_id = ? AND user_id = ?')
-        .bind(event.department_id, userId)
-        .first();
-      if (isDeptHead) return true;
-    }
-  }
-
-  // Check if assigned to event (as coordinator or volunteer)
-  const isAssigned = await db
-    .prepare('SELECT 1 FROM event_members WHERE event_id = ? AND user_id = ?')
-    .bind(eventId, userId)
-    .first();
-  return !!isAssigned;
-}
 
 // 1. SCAN ATTENDANCE (Strict UNIQUE constraint handles race conditions)
 operations.post('/events/:id/attendance/scan', rateLimit('scan', limits.scan), async (c) => {
@@ -49,11 +25,7 @@ operations.post('/events/:id/attendance/scan', rateLimit('scan', limits.scan), a
     throw new AppError('Opaque token is missing', 'VALIDATION_ERROR', 400);
   }
 
-  // Check authority
-  const hasAuth = await checkScannerAuthority(db, user.id, user.role, eventId);
-  if (!hasAuth) {
-    throw new AppError('Forbidden: You are not authorized to scan for this event', 'FORBIDDEN', 403);
-  }
+  await authorizeEventAction(db, user, eventId, 'scan_attendance');
 
   // Look up participant from token
   const reg = await db
@@ -123,14 +95,7 @@ operations.post('/events/:id/resources', async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const { name, quantity, eligibility = 'all', claim_limit = 1 } = body;
 
-  if (user.role === 'volunteer') {
-    throw new AppError('Forbidden: Volunteers cannot modify event configurations', 'FORBIDDEN', 403);
-  }
-
-  const hasAuth = await checkScannerAuthority(db, user.id, user.role, eventId);
-  if (!hasAuth) {
-    throw new AppError('Forbidden: Access denied', 'FORBIDDEN', 403);
-  }
+  await authorizeEventAction(db, user, eventId, 'manage_event');
 
   if (!name || !quantity) {
     throw new AppError('Missing resource name or quantity', 'VALIDATION_ERROR', 400);
@@ -172,7 +137,9 @@ operations.post('/events/:id/resources', async (c) => {
 // 3. LIST RESOURCES WITH REMAINING COUNTS (Dynamic dynamic calculation)
 operations.get('/events/:id/resources', async (c) => {
   const db = c.env.DB;
+  const user = c.get('user') as User;
   const eventId = c.req.param('id') || '';
+  await authorizeEventAction(db, user, eventId, 'view_ops_dashboard');
 
   const list = await db
     .prepare(
@@ -211,10 +178,7 @@ operations.post('/events/:id/resources/:resourceId/scan', rateLimit('scan', limi
     throw new AppError('Opaque token is missing', 'VALIDATION_ERROR', 400);
   }
 
-  const hasAuth = await checkScannerAuthority(db, user.id, user.role, eventId);
-  if (!hasAuth) {
-    throw new AppError('Forbidden: Access denied', 'FORBIDDEN', 403);
-  }
+  await authorizeEventAction(db, user, eventId, 'scan_resource');
 
   // Fetch resource and evaluate remaining counts on the fly
   const resource = await db
@@ -315,7 +279,9 @@ operations.post('/events/:id/resources/:resourceId/scan', rateLimit('scan', limi
 // 5. LIVE ATTENDANCE & RESOURCE DASHBOARD
 operations.get('/events/:id/dashboard', async (c) => {
   const db = c.env.DB;
+  const user = c.get('user') as User;
   const eventId = c.req.param('id') || '';
+  await authorizeEventAction(db, user, eventId, 'view_ops_dashboard');
 
   // Stats query
   const stats = await db
@@ -356,4 +322,3 @@ operations.get('/events/:id/dashboard', async (c) => {
 });
 
 export default operations;
-export { checkScannerAuthority };

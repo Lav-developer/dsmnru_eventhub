@@ -6,16 +6,19 @@ export interface Env {
 }
 
 export type UserRole = 'super_admin' | 'department_head' | 'coordinator' | 'volunteer';
+export type UserStatus = 'pending' | 'invited' | 'active' | 'suspended';
+export type VolunteerPermission = 'SCAN_ATTENDANCE' | 'SCAN_RESOURCE';
 
 export interface User {
   id: string;
   email: string;
   full_name: string;
   role: UserRole;
-  status: 'pending' | 'active' | 'suspended';
+  status: UserStatus;
   phone?: string;
   created_at: string;
   updated_at: string;
+  department_id?: string | null;
 }
 
 export interface Session {

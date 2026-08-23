@@ -133,8 +133,8 @@ admin.put('/users/:id/role', async (c) => {
     throw new AppError('Unauthorized', 'UNAUTHORIZED', 401);
   }
 
-  if (!role || !['super_admin', 'department_head', 'coordinator', 'volunteer'].includes(role)) {
-    throw new AppError('Invalid role specified', 'VALIDATION_ERROR', 400);
+  if (!role || !['department_head', 'coordinator', 'volunteer'].includes(role)) {
+    throw new AppError('Invalid role specified. Super Admin cannot be assigned through the API.', 'VALIDATION_ERROR', 400);
   }
 
   if (targetUserId === currentUser.id) {
@@ -147,6 +147,7 @@ admin.put('/users/:id/role', async (c) => {
   }
 
   await db.prepare('UPDATE users SET role = ?, updated_at = datetime(\'now\') WHERE id = ?').bind(role, targetUserId).run();
+  await db.prepare('DELETE FROM sessions WHERE user_id = ?').bind(targetUserId).run();
 
   await logAudit(
     db,

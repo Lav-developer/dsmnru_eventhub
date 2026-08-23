@@ -5,6 +5,13 @@ export function generateUUID(): string {
   return crypto.randomUUID();
 }
 
+export async function sha256Hex(value: string): Promise<string> {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(buf))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
 export function generateOpaqueToken(length = 32): string {
   const bytes = new Uint8Array(length);
   crypto.getRandomValues(bytes);
