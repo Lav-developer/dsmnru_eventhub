@@ -3461,8 +3461,16 @@ function EventTabScanners({ event }: { event: Event }) {
     }
   };
 
+  const lastScannedRef = useRef<{ token: string; timestamp: number } | null>(null);
+
   // Perform secure scan action on backend
   const executeScanAction = async (token: string) => {
+    const now = Date.now();
+    if (lastScannedRef.current && lastScannedRef.current.token === token && now - lastScannedRef.current.timestamp < 2000) {
+      return;
+    }
+    lastScannedRef.current = { token, timestamp: now };
+
     if (scanLoading) return;
     setScanLoading(true);
     setScannerResult(null);

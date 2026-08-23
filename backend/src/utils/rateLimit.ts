@@ -11,25 +11,22 @@ interface RateLimitConfig {
 // In-memory store for rate limiting per Worker isolate (lightweight pre-shield)
 const rateLimitStore = new Map<string, { count: number; resetTime: number }>();
 
-// Cleanup routine to prevent memory growth
-setInterval(() => {
-  const now = Date.now();
-  for (const [key, record] of rateLimitStore.entries()) {
-    if (now > record.resetTime) {
-      rateLimitStore.delete(key);
-    }
-  }
-}, 60000); // Clean up every minute
-
 export function rateLimit(category: string, config: RateLimitConfig) {
   return async (c: Context<HonoTypes>, next: Next) => {
+    const now = Date.now();
+
+    // Inline memory cleanup (safeguards isolate memory from swelling without global timers)
+    for (const [k, r] of rateLimitStore.entries()) {
+      if (now > r.resetTime) {
+        rateLimitStore.delete(k);
+      }
+    }
+
     // Determine client identifier (IP address, or user ID if authenticated)
     const ip = c.req.header('CF-Connecting-IP') || '127.0.0.1';
     const user = c.get('user');
     const identifier = user ? `user:${user.id}` : `ip:${ip}`;
     const key = `${category}:${identifier}`;
-
-    const now = Date.now();
 
     let count = 0;
     let resetTime = 0;
@@ -37,8 +34,13 @@ export function rateLimit(category: string, config: RateLimitConfig) {
     if (config.useDb && c.env.DB) {
       const db = c.env.DB;
       try {
-        // Clean up expired records inline (very fast index-based cleanup)
-        await db.prepare('DELETE FROM rate_limit_records WHERE reset_time < ?').bind(now).run();
+        // Probabilistic background cleanup (5% chance) to avoid database write amplification on every request
+        if (Math.random() < 0.05 && c.executionCtx) {
+          c.executionCtx.waitUntil(
+            db.prepare('DELETE FROM rate_limit_records WHERE reset_time < ?').bind(now).run()
+              .catch((err) => console.error('Rate limit cleanup failed:', err))
+          );
+        }
 
         // Check/Update database count
         const record = await db
@@ -111,7 +113,7 @@ export function rateLimit(category: string, config: RateLimitConfig) {
 export const limits = {
   auth: { windowMs: 15 * 60 * 1000, max: 20, useDb: true }, // 20 requests per 15 mins (login/register) - DB backed
   registration: { windowMs: 1 * 60 * 1000, max: 15, useDb: true }, // 15 registrations per minute per IP - DB backed
-  verification: { windowMs: 1 * 60 * 1000, max: 30, useDb: true }, // 30 certificate verifications per minute - DB backed
+  verification: { windowMs: 1 * 60 * 1000, max: 30 }, // 30 certificate verifications per minute - memory only
   csv: { windowMs: 5 * 60 * 1000, max: 10, useDb: true }, // 10 imports/exports per 5 mins - DB backed
   email: { windowMs: 10 * 60 * 1000, max: 5, useDb: true }, // 5 campaigns per 10 mins - DB backed
   scan: { windowMs: 1 * 60 * 1000, max: 120 }, // 120 scans per minute (high throughout allowed, memory only)

@@ -76,17 +76,6 @@ operations.post('/events/:id/attendance/scan', rateLimit('scan', limits.scan), a
       .bind(attendanceId, eventId, reg.id, user.id, attendance_type)
       .run();
 
-    await logAudit(
-      db,
-      user.id,
-      user.email,
-      'SCAN_ATTENDANCE_SUCCESS',
-      'attendance',
-      attendanceId,
-      { eventId, registrationId: reg.registration_id, participantEmail: reg.email, scannerName: user.full_name },
-      c.req.header('CF-Connecting-IP')
-    );
-
     return c.json({
       success: true,
       data: {
@@ -283,17 +272,6 @@ operations.post('/events/:id/resources/:resourceId/scan', rateLimit('scan', limi
       )
       .bind(claimId, eventId, reg.id, resourceId, user.id)
       .run();
-
-    await logAudit(
-      db,
-      user.id,
-      user.email,
-      'CLAIM_RESOURCE_SUCCESS',
-      'resource_claim',
-      claimId,
-      { eventId, resourceName: resource.name, registrationId: reg.registration_id },
-      c.req.header('CF-Connecting-IP')
-    );
 
     return c.json({
       success: true,

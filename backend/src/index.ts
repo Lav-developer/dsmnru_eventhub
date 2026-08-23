@@ -3,6 +3,7 @@ import { cors } from 'hono/cors';
 import { Env, HonoTypes, User, Session } from './types';
 import { authenticate } from './utils/auth';
 import { handleAppError, AppError } from './utils/errors';
+import { processEmailQueue } from './utils/emailQueue';
 import authRouter from './routes/auth';
 import adminRouter from './routes/admin';
 import departmentsRouter from './routes/departments';
@@ -173,7 +174,15 @@ app.route('/api/v1', apiV1);
 // 7. Global Error Handling
 app.onError(handleAppError);
 
-export default app;
+// Cloudflare Workers exported entry points
+export default {
+  fetch: app.fetch,
+  async scheduled(_event: any, env: Env, ctx: any) {
+    console.log('[Cron] Running scheduled email queue consumer...');
+    ctx.waitUntil(processEmailQueue(env));
+  }
+};
+
 export type { Env };
 export type { HonoTypes };
 export type { User };
