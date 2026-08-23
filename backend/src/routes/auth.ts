@@ -1,10 +1,11 @@
 import { Hono } from 'hono';
 import { AppError } from '../utils/errors';
-import { hashPassword, verifyPassword, generateUUID, generateOpaqueToken, sha256Hex } from '../utils/crypto';
+import { hashPassword, verifyPassword, generateUUID, generateOpaqueToken } from '../utils/crypto';
 import { logAudit } from '../utils/audit';
 import { rateLimit, limits } from '../utils/rateLimit';
 import { HonoTypes } from '../types';
 import { getUserDepartmentId } from '../utils/authorize';
+import { consumeSetupToken } from '../utils/provision';
 
 const auth = new Hono<HonoTypes>();
 
@@ -94,27 +95,8 @@ auth.post('/setup-password', rateLimit('auth', limits.auth), async (c) => {
   }
   assertPasswordPolicy(password);
 
-  const tokenHash = await sha256Hex(token);
-  const row = await db
-    .prepare(
-      `SELECT id, user_id, expires_at, used_at FROM account_setup_tokens WHERE token_hash = ?`
-    )
-    .bind(tokenHash)
-    .first<any>();
-
-  if (!row || row.used_at) {
-    throw new AppError('Invalid or already used setup token', 'INVALID_TOKEN', 400);
-  }
-  if (new Date(row.expires_at).getTime() < Date.now()) {
-    throw new AppError('Setup token has expired', 'TOKEN_EXPIRED', 400);
-  }
-
   const hashedPassword = await hashPassword(password);
-  await db
-    .prepare(`UPDATE users SET password_hash = ?, status = 'active', password_set = 1, updated_at = datetime('now') WHERE id = ?`)
-    .bind(hashedPassword, row.user_id)
-    .run();
-  await db.prepare(`UPDATE account_setup_tokens SET used_at = datetime('now') WHERE id = ?`).bind(row.id).run();
+  await consumeSetupToken(db, token, hashedPassword);
 
   return c.json({ success: true, data: { message: 'Password set. You can now log in.' } });
 });

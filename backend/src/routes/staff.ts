@@ -32,7 +32,7 @@ async function createProvisionedUser(
       `INSERT INTO users (id, email, password_hash, full_name, phone, role, status, password_set)
        VALUES (?, ?, ?, ?, ?, ?, ?, 0)`
     )
-    .bind(userId, email, passwordHash, opts.full_name, opts.phone || null, opts.role, opts.status || 'active')
+    .bind(userId, email, passwordHash, opts.full_name, opts.phone || null, opts.role, opts.status || 'invited')
     .run();
   const setupToken = await createSetupToken(db, userId);
   return { userId, setupToken };
@@ -56,7 +56,7 @@ staff.post('/department-heads', async (c) => {
     full_name,
     phone,
     role: 'department_head',
-    status: 'active'
+    status: 'invited'
   });
   await db
     .prepare('INSERT INTO department_members (department_id, user_id) VALUES (?, ?)')
@@ -71,7 +71,7 @@ staff.post('/department-heads', async (c) => {
       id: userId,
       email: email.toLowerCase(),
       role: 'department_head',
-      status: 'active',
+      status: 'invited',
       setup_token: setupToken
     }
   });
@@ -101,7 +101,7 @@ staff.post('/coordinators', async (c) => {
     full_name,
     phone,
     role: 'coordinator',
-    status: 'active'
+    status: 'invited'
   });
   await db
     .prepare('INSERT INTO department_members (department_id, user_id) VALUES (?, ?)')
@@ -112,7 +112,7 @@ staff.post('/coordinators', async (c) => {
 
   return c.json({
     success: true,
-    data: { id: userId, email: email.toLowerCase(), role: 'coordinator', status: 'active', setup_token: setupToken }
+    data: { id: userId, email: email.toLowerCase(), role: 'coordinator', status: 'invited', setup_token: setupToken }
   });
 });
 
@@ -147,7 +147,7 @@ staff.post('/volunteers', async (c) => {
       full_name,
       phone,
       role: 'volunteer',
-      status: 'active'
+      status: 'invited'
     });
     userId = created.userId;
     setupToken = created.setupToken;
@@ -172,7 +172,7 @@ staff.post('/volunteers', async (c) => {
 
   return c.json({
     success: true,
-    data: { id: userId, email: email.toLowerCase(), role: 'volunteer', status: 'active', setup_token: setupToken }
+    data: { id: userId, email: email.toLowerCase(), role: 'volunteer', status: setupToken ? 'invited' : 'active', setup_token: setupToken }
   });
 });
 

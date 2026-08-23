@@ -151,6 +151,9 @@ class MockD1 {
     if (s.includes('COUNT(*) as count FROM users')) {
       return [{ count: this.users.size }];
     }
+    if (s.includes('FROM account_setup_tokens')) {
+      return this.setup_tokens.filter((t) => t.token_hash === params[0]);
+    }
     return [];
   }
 
@@ -190,6 +193,27 @@ class MockD1 {
     }
     if (s.startsWith('INSERT INTO volunteer_event_permissions')) {
       this.volunteer_perms.push({ event_id: params[0], user_id: params[1], permission: params[2] });
+    }
+    if (s.startsWith('INSERT INTO account_setup_tokens')) {
+      this.setup_tokens.push({
+        id: params[0],
+        user_id: params[1],
+        token_hash: params[2],
+        expires_at: params[3],
+        used_at: null
+      });
+    }
+    if (s.startsWith('UPDATE users SET password_hash')) {
+      const u = this.users.get(params[1]);
+      if (u) {
+        u.password_hash = params[0];
+        u.status = 'active';
+        u.password_set = 1;
+      }
+    }
+    if (s.startsWith('UPDATE account_setup_tokens SET used_at')) {
+      const tok = this.setup_tokens.find((t) => t.id === params[0]);
+      if (tok) tok.used_at = new Date().toISOString();
     }
     if (s.startsWith('DELETE FROM sessions')) {
       this.sessions = this.sessions.filter((x) => x.user_id !== params[0] && x.id !== params[0]);
@@ -329,6 +353,98 @@ function testCoordinatorCreateAllowedInRoute() {
   console.log('✅ Test 11 Passed!');
 }
 
+function testMigrationsDoNotDuplicatePasswordSet() {
+  console.log('\nRunning Test 13: Fresh 0001+0002 must not re-add password_set...');
+  const one = readFileSync(resolve(process.cwd(), 'migrations/0001_schema.sql'), 'utf8');
+  const two = readFileSync(resolve(process.cwd(), 'migrations/0002_rbac.sql'), 'utf8');
+  if (!/password_set INTEGER/.test(one)) {
+    throw new Error('0001_schema.sql must define users.password_set');
+  }
+  if (/^\s*ALTER TABLE users ADD COLUMN password_set/m.test(two)) {
+    throw new Error('0002_rbac.sql must not ADD COLUMN password_set (duplicate on fresh apply)');
+  }
+  console.log('✅ Test 13 Passed!');
+}
+
+function testProvisionedUsersStartInvited() {
+  console.log('\nRunning Test 14: Provisioned staff start as invited until setup...');
+  const staff = readFileSync(resolve(process.cwd(), 'src/routes/staff.ts'), 'utf8');
+  if (staff.includes("status: 'active'") && staff.includes('createProvisionedUser')) {
+    const creates = staff.match(/createProvisionedUser\([\s\S]*?status: '(\w+)'/g) || [];
+    for (const block of creates) {
+      if (block.includes("status: 'active'")) {
+        throw new Error('Provisioned users must be invited, not active, before password setup');
+      }
+    }
+  }
+  if (!staff.includes("status: 'invited'")) {
+    throw new Error('staff provisioning must set invited');
+  }
+  if (!staff.includes("opts.status || 'invited'")) {
+    throw new Error('createProvisionedUser default status must be invited');
+  }
+  console.log('✅ Test 14 Passed!');
+}
+
+async function testSetupTokenSingleUseAndExpiry() {
+  console.log('\nRunning Test 15: Setup token single-use and expiry...');
+  const { consumeSetupToken, createSetupToken } = await import('../utils/provision');
+  const rawDb = new MockD1();
+  const db = rawDb as unknown as D1Database;
+  rawDb.users.set('u1', { id: 'u1', status: 'invited', password_set: 0, password_hash: 'x' });
+
+  const token = await createSetupToken(db, 'u1', 48);
+  const userId = await consumeSetupToken(db, token, 'new-hash');
+  if (userId !== 'u1') throw new Error('consume should return user id');
+  if (rawDb.users.get('u1')?.status !== 'active') throw new Error('user must become active after setup');
+  await expectDenied(() => consumeSetupToken(db, token, 'again'), 400);
+
+  rawDb.users.set('u2', { id: 'u2', status: 'invited', password_set: 0, password_hash: 'x' });
+  const expired = await createSetupToken(db, 'u2', 48);
+  const expiredRow = rawDb.setup_tokens.find((t) => t.user_id === 'u2');
+  if (expiredRow) expiredRow.expires_at = new Date(Date.now() - 1000).toISOString();
+  await expectDenied(() => consumeSetupToken(db, expired, 'hash'), 400);
+
+  console.log('✅ Test 15 Passed!');
+}
+
+async function testFullHierarchyAuthorization() {
+  console.log('\nRunning Test 16: Super Admin → DH → Coordinator → Volunteer flow...');
+  const db = new MockD1() as unknown as D1Database;
+  const raw = db as unknown as MockD1;
+  raw.departments.set('dept-a', { id: 'dept-a' });
+  raw.departments.set('dept-b', { id: 'dept-b' });
+  raw.department_members.push({ department_id: 'dept-a', user_id: 'dh' });
+  raw.department_members.push({ department_id: 'dept-a', user_id: 'coord' });
+  raw.department_members.push({ department_id: 'dept-b', user_id: 'other-dh' });
+  raw.events.set('own', { id: 'own', department_id: 'dept-a' });
+  raw.events.set('other', { id: 'other', department_id: 'dept-b' });
+  raw.event_members.push({ event_id: 'own', user_id: 'coord', role: 'coordinator' });
+  raw.event_members.push({ event_id: 'own', user_id: 'vol', role: 'volunteer' });
+  raw.volunteer_perms.push({ event_id: 'own', user_id: 'vol', permission: 'SCAN_ATTENDANCE' });
+
+  const admin = user({ id: 'sa', role: 'super_admin' });
+  const dh = user({ id: 'dh', role: 'department_head' });
+  const coord = user({ id: 'coord', role: 'coordinator' });
+  const vol = user({ id: 'vol', role: 'volunteer' });
+  const otherDh = user({ id: 'other-dh', role: 'department_head' });
+
+  if ((await authorizeCreateEvent(db, admin)) !== null) throw new Error('SA create is any department');
+  if ((await authorizeCreateEvent(db, dh)) !== 'dept-a') throw new Error('DH own department only');
+  if ((await authorizeCreateEvent(db, coord)) !== 'dept-a') throw new Error('Coordinator own department only');
+  await expectDenied(() => authorizeCreateEvent(db, vol));
+
+  await authorizeEventAction(db, dh, 'own', 'manage_event');
+  await expectDenied(() => authorizeEventAction(db, dh, 'other', 'manage_event'));
+  await expectDenied(() => authorizeEventAction(db, otherDh, 'own', 'manage_event'));
+  await expectDenied(() => authorizeEventAction(db, coord, 'other', 'manage_event'));
+  await expectDenied(() => authorizeEventAction(db, vol, 'own', 'manage_event'));
+  await authorizeEventAction(db, vol, 'own', 'scan_attendance');
+  await expectDenied(() => authorizeEventAction(db, vol, 'own', 'scan_resource'));
+
+  console.log('✅ Test 16 Passed!');
+}
+
 function testSchemaRelationships() {
   console.log('\nRunning Test 12: Schema has membership + volunteer permission tables...');
   const schema = readFileSync(resolve(process.cwd(), 'migrations/0001_schema.sql'), 'utf8');
@@ -352,6 +468,10 @@ async function main() {
   testVolunteerPermissionsNotGenericManage();
   testCoordinatorCreateAllowedInRoute();
   testSchemaRelationships();
+  testMigrationsDoNotDuplicatePasswordSet();
+  testProvisionedUsersStartInvited();
+  await testSetupTokenSingleUseAndExpiry();
+  await testFullHierarchyAuthorization();
   console.log('\n==================================================');
   console.log('🎉 ALL INTEGRATION & PRODUCTION-HARDENING TESTS PASSED!');
   console.log('==================================================');

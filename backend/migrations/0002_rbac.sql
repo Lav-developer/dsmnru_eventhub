@@ -1,6 +1,6 @@
--- RBAC hierarchy, account setup tokens, volunteer permissions, department status
-
-ALTER TABLE users ADD COLUMN password_set INTEGER NOT NULL DEFAULT 1;
+-- Incremental RBAC objects for databases created before 0001 included them.
+-- Fresh installs already create these tables in 0001_schema.sql (IF NOT EXISTS).
+-- Do NOT ADD COLUMN password_set here: 0001_schema.sql already defines it.
 
 CREATE TABLE IF NOT EXISTS account_setup_tokens (
   id TEXT PRIMARY KEY,
