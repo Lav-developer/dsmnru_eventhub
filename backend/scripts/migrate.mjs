@@ -13,14 +13,57 @@
 // Any extra flags are forwarded verbatim to wrangler.
 
 import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { planPasswordSetReconcile, describePlan, PASSWORD_SET_MIGRATION } from './migrate-plan.mjs';
 
 const DB_NAME = 'dsmnru-eventhub-db';
 const MIGRATIONS_TABLE = 'd1_migrations';
 
-// On Windows, `npx` is a .cmd shim and is not directly executable by
-// spawnSync, which fails with ENOENT. Use npx.cmd there.
-const npxCommand = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+// Resolve the backend project root from this file, so the runner works no
+// matter which directory it is invoked from.
+const PROJECT_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+
+/**
+ * Locate the project's LOCAL wrangler and the argv needed to run it.
+ *
+ * Never depends on PATH, npx, or a global wrangler install.
+ *
+ * Windows note: Node refuses to spawn .cmd/.bat files without `shell: true`
+ * (CVE-2024-27980 hardening) and fails with EINVAL, which is what broke the
+ * previous npx.cmd approach. Enabling `shell: true` would just move the
+ * problem — it re-introduces quoting/injection issues for arguments such as
+ * --command "<SQL>". So we bypass the shim entirely and run wrangler's Node
+ * entrypoint (node_modules/wrangler/bin/wrangler.js) with the current Node
+ * binary. That is a plain .js file, so no shell and no .cmd is involved and
+ * the exact same code path runs on every platform.
+ */
+function resolveWrangler() {
+  const entry = join(PROJECT_ROOT, 'node_modules', 'wrangler', 'bin', 'wrangler.js');
+  if (existsSync(entry)) {
+    return { command: process.execPath, prefix: [entry] };
+  }
+
+  // Fallback: the .bin shim, selected per platform as requested. Only reached
+  // if the wrangler package layout changes.
+  const shim = join(
+    PROJECT_ROOT,
+    'node_modules',
+    '.bin',
+    process.platform === 'win32' ? 'wrangler.cmd' : 'wrangler'
+  );
+  if (existsSync(shim)) {
+    // .cmd shims must go through a shell on Windows (see note above).
+    return { command: shim, prefix: [], shell: process.platform === 'win32' };
+  }
+
+  throw new Error(
+    `Could not find the project's local wrangler.\nLooked for:\n  ${entry}\n  ${shim}\nRun \`npm install\` inside ${PROJECT_ROOT} first.`
+  );
+}
+
+const WRANGLER = resolveWrangler();
 
 const argv = process.argv.slice(2);
 const isRemote = argv.includes('--remote');
@@ -29,10 +72,12 @@ const targetFlags = isRemote ? ['--remote'] : ['--local'];
 const passthrough = argv.filter((a) => a !== '--remote' && a !== '--local');
 
 function wrangler(args, { capture = false } = {}) {
-  const res = spawnSync(npxCommand, ['wrangler', ...args], {
+  const res = spawnSync(WRANGLER.command, [...WRANGLER.prefix, ...args], {
+    cwd: PROJECT_ROOT,
     encoding: 'utf8',
     stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit',
-    env: { ...process.env, WRANGLER_SEND_METRICS: 'false' }
+    env: { ...process.env, WRANGLER_SEND_METRICS: 'false' },
+    ...(WRANGLER.shell ? { shell: true } : {})
   });
   if (res.error) throw res.error;
   return res;
