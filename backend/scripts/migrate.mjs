@@ -18,6 +18,10 @@ import { planPasswordSetReconcile, describePlan, PASSWORD_SET_MIGRATION } from '
 const DB_NAME = 'dsmnru-eventhub-db';
 const MIGRATIONS_TABLE = 'd1_migrations';
 
+// On Windows, `npx` is a .cmd shim and is not directly executable by
+// spawnSync, which fails with ENOENT. Use npx.cmd there.
+const npxCommand = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+
 const argv = process.argv.slice(2);
 const isRemote = argv.includes('--remote');
 // Default to --local so a bare `npm run db:migrate` never touches production.
@@ -25,7 +29,7 @@ const targetFlags = isRemote ? ['--remote'] : ['--local'];
 const passthrough = argv.filter((a) => a !== '--remote' && a !== '--local');
 
 function wrangler(args, { capture = false } = {}) {
-  const res = spawnSync('npx', ['wrangler', ...args], {
+  const res = spawnSync(npxCommand, ['wrangler', ...args], {
     encoding: 'utf8',
     stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit',
     env: { ...process.env, WRANGLER_SEND_METRICS: 'false' }
