@@ -1726,8 +1726,15 @@ function AdminUsers() {
       .finally(() => setLoading(false));
   };
 
+  const fetchDepts = () => {
+    apiRequest<Department[]>('/departments')
+      .then((data) => setDepts(data || []))
+      .catch((err) => alert(err.message));
+  };
+
   useEffect(() => {
     fetchUsers();
+    fetchDepts();
   }, []);
 
   const handleStatusChange = async (userId: string, status: string) => {
@@ -1777,7 +1784,8 @@ function AdminUsers() {
       >
         <input className="border rounded px-3 py-2 text-sm" placeholder="Head name" value={dhName} onChange={(e) => setDhName(e.target.value)} required />
         <input className="border rounded px-3 py-2 text-sm" placeholder="Email" type="email" value={dhEmail} onChange={(e) => setDhEmail(e.target.value)} required />
-        <select className="border rounded px-3 py-2 text-sm" value={dhDept} onChange={(e) => setDhDept(e.target.value)}>
+        <select className="border rounded px-3 py-2 text-sm" value={dhDept} onChange={(e) => setDhDept(e.target.value)} required>
+          <option value="" disabled>Select department</option>
           {depts.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
         </select>
         <button className="bg-primary-600 text-white text-xs font-bold px-4 py-2 rounded">Create Department Head</button>
