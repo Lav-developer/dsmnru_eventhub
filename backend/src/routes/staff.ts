@@ -4,7 +4,7 @@ import { AppError } from '../utils/errors';
 import { logAudit } from '../utils/audit';
 import { HonoTypes, User, VolunteerPermission } from '../types';
 import { generateUUID } from '../utils/crypto';
-import { createSetupToken, invalidateSessions, placeholderPasswordHash } from '../utils/provision';
+import { createSetupToken, initialPasswordHashForEmail, invalidateSessions } from '../utils/provision';
 import {
   authorizeEventAction,
   getUserDepartmentId,
@@ -26,11 +26,14 @@ async function createProvisionedUser(
     throw new AppError('A user with this email already exists', 'EMAIL_EXISTS', 409);
   }
   const userId = generateUUID();
-  const passwordHash = await placeholderPasswordHash();
+  // Initial password IS the user's email address, stored only as a PBKDF2 hash.
+  // Valid for the first login only: force_password_change = 1 gates that
+  // session until a new password is chosen.
+  const passwordHash = await initialPasswordHashForEmail(email);
   await db
     .prepare(
-      `INSERT INTO users (id, email, password_hash, full_name, phone, role, status, password_set)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 0)`
+      `INSERT INTO users (id, email, password_hash, full_name, phone, role, status, password_set, force_password_change)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 0, 1)`
     )
     .bind(userId, email, passwordHash, opts.full_name, opts.phone || null, opts.role, opts.status || 'active')
     .run();
@@ -72,7 +75,11 @@ staff.post('/department-heads', async (c) => {
       email: email.toLowerCase(),
       role: 'department_head',
       status: 'active',
-      setup_token: setupToken
+      setup_token: setupToken,
+      // The initial password is the user's own email address. It is never
+      // returned or logged in plaintext beyond this hint to the creating admin.
+      initial_password_is_email: true,
+      force_password_change: true
     }
   });
 });
@@ -106,7 +113,15 @@ staff.post('/coordinators', async (c) => {
 
   return c.json({
     success: true,
-    data: { id: userId, email: email.toLowerCase(), role: 'coordinator', status: 'active', setup_token: setupToken }
+    data: {
+      id: userId,
+      email: email.toLowerCase(),
+      role: 'coordinator',
+      status: 'active',
+      setup_token: setupToken,
+      initial_password_is_email: true,
+      force_password_change: true
+    }
   });
 });
 
@@ -166,7 +181,15 @@ staff.post('/volunteers', async (c) => {
 
   return c.json({
     success: true,
-    data: { id: userId, email: email.toLowerCase(), role: 'volunteer', status: 'active', setup_token: setupToken }
+    data: {
+      id: userId,
+      email: email.toLowerCase(),
+      role: 'volunteer',
+      status: 'active',
+      setup_token: setupToken,
+      initial_password_is_email: true,
+      force_password_change: !!setupToken
+    }
   });
 });
 

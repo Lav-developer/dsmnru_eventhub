@@ -57,6 +57,9 @@ interface User {
   status: 'pending' | 'active' | 'suspended';
   phone?: string;
   created_at: string;
+  /** Server-side truth: account still uses its provisioned email-as-password. */
+  force_password_change?: boolean;
+  password_set?: boolean;
 }
 
 interface Department {
@@ -249,9 +252,23 @@ export default function App() {
             <Route path="/" element={<Home />} />
             <Route path="/login" element={<Login setCurrentUser={setCurrentUser} />} />
             <Route path="/setup-password" element={<SetupPassword />} />
+            <Route path="/change-password" element={<ChangePassword currentUser={currentUser} setCurrentUser={setCurrentUser} />} />
             <Route path="/events/:slug" element={<EventPage />} />
             <Route path="/verify/:certificateId" element={<CertificateVerifyPage />} />
-            <Route path="/dashboard/*" element={currentUser ? <Dashboard currentUser={currentUser} /> : <Link to="/login" />} />
+            <Route
+              path="/dashboard/*"
+              element={
+                !currentUser ? (
+                  <Link to="/login" />
+                ) : currentUser.force_password_change ? (
+                  // Server also rejects every dashboard API with
+                  // PASSWORD_CHANGE_REQUIRED; this just routes the user there.
+                  <ForcedPasswordChangeRedirect />
+                ) : (
+                  <Dashboard currentUser={currentUser} />
+                )
+              }
+            />
           </Routes>
         </main>
 
@@ -539,13 +556,22 @@ function Login({ setCurrentUser }: { setCurrentUser: (user: User | null) => void
     setError(null);
 
     try {
-      const data = await apiRequest<{ token: string; user: User }>('/auth/login', {
-        method: 'POST',
-        body: JSON.stringify({ email, password })
-      });
-      
+      const data = await apiRequest<{ token: string; user: User; force_password_change?: boolean }>(
+        '/auth/login',
+        {
+          method: 'POST',
+          body: JSON.stringify({ email, password })
+        }
+      );
+
       setCurrentUser(data.user);
-      navigate('/dashboard');
+      // Server-side truth decides. Every dashboard API is blocked with
+      // PASSWORD_CHANGE_REQUIRED until the password is changed.
+      if (data.force_password_change || data.user?.force_password_change) {
+        navigate('/change-password', { replace: true });
+      } else {
+        navigate('/dashboard');
+      }
     } catch (err: any) {
       setError(err.message || 'Login failed. Please verify credentials.');
     } finally {
@@ -609,6 +635,162 @@ function Login({ setCurrentUser }: { setCurrentUser: (user: User | null) => void
         </form>
 
         <p className="text-center text-xs text-slate-400">Staff accounts are provisioned by the role hierarchy. Participants register on event pages only.</p>
+      </div>
+    </div>
+  );
+}
+
+// ==========================================
+// PAGE: FORCED / VOLUNTARY PASSWORD CHANGE
+// ==========================================
+function ForcedPasswordChangeRedirect() {
+  const navigate = useNavigate();
+  useEffect(() => {
+    navigate('/change-password', { replace: true });
+  }, [navigate]);
+  return (
+    <div className="py-16 text-center">
+      <RefreshCw className="w-8 h-8 text-primary-600 animate-spin mx-auto mb-3" />
+      <p className="text-sm text-slate-600 font-medium">Password change required — redirecting…</p>
+    </div>
+  );
+}
+
+function ChangePassword({
+  currentUser,
+  setCurrentUser
+}: {
+  currentUser: User | null;
+  setCurrentUser: (user: User | null) => void;
+}) {
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const navigate = useNavigate();
+
+  const forced = !!currentUser?.force_password_change;
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+
+    if (newPassword !== confirmPassword) {
+      setError('New password and confirmation do not match.');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      await apiRequest('/auth/change-password', {
+        method: 'POST',
+        body: JSON.stringify({ current_password: currentPassword, new_password: newPassword })
+      });
+
+      // Server rotated the session; re-read authoritative state.
+      const me = await apiRequest<any>('/auth/me');
+      setCurrentUser(me?.user || null);
+      navigate('/dashboard', { replace: true });
+    } catch (err: any) {
+      setError(err.message || 'Password change failed.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (!currentUser) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center px-4">
+        <div className="max-w-md w-full bg-white border border-slate-200 rounded-2xl shadow-sm p-8 text-center space-y-4">
+          <h2 className="text-xl font-extrabold text-slate-800">Sign in required</h2>
+          <p className="text-sm text-slate-500">Log in first to change your password.</p>
+          <Link to="/login" className="inline-block bg-primary-600 text-white px-4 py-2 rounded-lg text-sm font-bold">
+            Go to login
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-slate-50 flex items-center justify-center py-12 px-4">
+      <div className="max-w-md w-full bg-white border border-slate-200 rounded-2xl shadow-sm p-8 space-y-6">
+        <div className="text-center space-y-2">
+          <span className="text-4xl block">🔐</span>
+          <h2 className="text-2xl font-extrabold text-slate-800">
+            {forced ? 'Set a new password' : 'Change password'}
+          </h2>
+          {forced && (
+            <p className="text-sm text-slate-500">
+              Your account currently uses your email address as its password. Choose a new password to
+              continue — the initial password stops working immediately.
+            </p>
+          )}
+        </div>
+
+        {forced && (
+          <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-amber-800 text-xs flex items-start space-x-2">
+            <ShieldAlert className="w-4 h-4 flex-shrink-0 mt-0.5" />
+            <span className="font-medium">
+              Dashboard access is locked until you set a new password.
+            </span>
+          </div>
+        )}
+
+        {error && (
+          <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-red-700 text-sm flex items-center space-x-2">
+            <AlertTriangle className="w-5 h-5 flex-shrink-0" />
+            <span className="font-medium">{error}</span>
+          </div>
+        )}
+
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div className="space-y-1">
+            <label className="block text-xs font-bold uppercase tracking-wider text-slate-500">
+              {forced ? 'Current password (your email address)' : 'Current password'}
+            </label>
+            <input
+              type="password"
+              required
+              value={currentPassword}
+              onChange={(e) => setCurrentPassword(e.target.value)}
+              placeholder={forced ? currentUser.email : '••••••••'}
+              className="w-full px-4 py-2.5 rounded-lg border border-slate-300 text-sm"
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="block text-xs font-bold uppercase tracking-wider text-slate-500">New password</label>
+            <input
+              type="password"
+              required
+              minLength={8}
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+              placeholder="At least 8 characters"
+              className="w-full px-4 py-2.5 rounded-lg border border-slate-300 text-sm"
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="block text-xs font-bold uppercase tracking-wider text-slate-500">Confirm new password</label>
+            <input
+              type="password"
+              required
+              minLength={8}
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+              placeholder="Repeat new password"
+              className="w-full px-4 py-2.5 rounded-lg border border-slate-300 text-sm"
+            />
+          </div>
+          <button
+            type="submit"
+            disabled={loading}
+            className="w-full bg-primary-600 hover:bg-primary-700 text-white py-3 rounded-lg font-bold text-sm flex items-center justify-center space-x-2"
+          >
+            {loading ? <RefreshCw className="w-5 h-5 animate-spin" /> : <span>Save new password</span>}
+          </button>
+        </form>
       </div>
     </div>
   );
@@ -1338,6 +1520,7 @@ function Dashboard({ currentUser }: { currentUser: User }) {
           <Route path="/health" element={<AdminHealth />} />
           <Route path="/create-event" element={currentUser.role === 'volunteer' ? <ForbiddenNote /> : <CreateEventWizard />} />
           <Route path="/coordinators" element={<DeptCoordinators currentUser={currentUser} />} />
+          <Route path="/volunteers" element={<CoordinatorVolunteers currentUser={currentUser} />} />
           <Route path="/event-manager/:eventId/*" element={<EventManager currentUser={currentUser} />} />
         </Routes>
       </div>
@@ -1378,6 +1561,10 @@ function CoordinatorMenu() {
       <Link to="/dashboard/create-event" className="flex items-center space-x-3 px-3 py-2 rounded-lg hover:bg-slate-800 text-slate-300 transition">
         <Plus className="w-4 h-4 text-primary-400" />
         <span>Create Event</span>
+      </Link>
+      <Link to="/dashboard/volunteers" className="flex items-center space-x-3 px-3 py-2 rounded-lg hover:bg-slate-800 text-slate-300 transition">
+        <UserPlus className="w-4 h-4 text-primary-400" />
+        <span>Volunteers</span>
       </Link>
     </div>
   );
@@ -1461,6 +1648,73 @@ function DeptCoordinators({ currentUser }: { currentUser: User }) {
 // ==========================================
 // SUB-PAGE: DASHBOARD PORTAL OVERVIEW
 // ==========================================
+/**
+ * Coordinator dashboard: Event -> Volunteers -> Add Volunteer.
+ *
+ * Only events the coordinator is authorized to manage are selectable; the
+ * server re-checks authorization on every create (manage_volunteers).
+ */
+function CoordinatorVolunteers({ currentUser }: { currentUser: User }) {
+  const [events, setEvents] = useState<Event[]>([]);
+  const [eventId, setEventId] = useState('');
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    apiRequest<Event[]>('/events')
+      .then((d) => {
+        const list = d || [];
+        setEvents(list);
+        if (list.length > 0) setEventId((prev) => prev || list[0].id);
+      })
+      .catch(() => setEvents([]))
+      .finally(() => setLoading(false));
+  }, []);
+
+  if (currentUser.role !== 'coordinator' && currentUser.role !== 'super_admin' && currentUser.role !== 'department_head') {
+    return (
+      <div className="bg-red-50 border border-red-200 rounded-xl p-6 text-red-700 text-sm font-semibold">
+        403 — Only Coordinators may manage volunteers.
+      </div>
+    );
+  }
+
+  const selected = events.find((e) => e.id === eventId);
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-3xl font-extrabold text-slate-800">Volunteers</h1>
+        <p className="text-sm text-slate-500 mt-1">
+          Choose one of your events, then add volunteers and grant scanner permissions.
+        </p>
+      </div>
+
+      <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-2">
+        <label className="block text-xs font-bold uppercase tracking-wider text-slate-500">Event</label>
+        {loading ? (
+          <p className="text-sm text-slate-500">Loading your events…</p>
+        ) : events.length === 0 ? (
+          <p className="text-sm text-slate-500">You are not assigned to any events yet.</p>
+        ) : (
+          <select
+            value={eventId}
+            onChange={(e) => setEventId(e.target.value)}
+            className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
+          >
+            {events.map((ev) => (
+              <option key={ev.id} value={ev.id}>
+                {ev.name}
+              </option>
+            ))}
+          </select>
+        )}
+      </div>
+
+      {selected && <EventTabVolunteers event={selected} />}
+    </div>
+  );
+}
+
 function DashboardOverview({ currentUser }: { currentUser: User }) {
   const [events, setEvents] = useState<Event[]>([]);
   const [loading, setLoading] = useState(true);
@@ -4506,6 +4760,8 @@ function EventTabVolunteers({ event }: { event: Event }) {
   const [scanAtt, setScanAtt] = useState(true);
   const [scanRes, setScanRes] = useState(false);
   const [token, setToken] = useState<string | null>(null);
+  const [created, setCreated] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
   const [list, setList] = useState<any[]>([]);
 
   const load = () => {
@@ -4523,25 +4779,42 @@ function EventTabVolunteers({ event }: { event: Event }) {
             ...(scanAtt ? ['SCAN_ATTENDANCE'] : []),
             ...(scanRes ? ['SCAN_RESOURCE'] : [])
           ];
-          const res = await apiRequest<any>('/staff/volunteers', {
-            method: 'POST',
-            body: JSON.stringify({ email, full_name: name, phone, event_id: event.id, permissions })
-          });
-          setToken(res.setup_token || null);
-          setName('');
-          setEmail('');
-          setPhone('');
-          load();
+          setErr(null);
+          try {
+            const res = await apiRequest<any>('/staff/volunteers', {
+              method: 'POST',
+              body: JSON.stringify({ email, full_name: name, phone, event_id: event.id, permissions })
+            });
+            setToken(res.setup_token || null);
+            setCreated(res.email || email);
+            setName('');
+            setEmail('');
+            setPhone('');
+            load();
+          } catch (e2: any) {
+            setErr(e2.message || 'Could not create volunteer');
+          }
         }}
       >
-        <h2 className="font-bold text-slate-800">Add volunteer</h2>
+        <h2 className="font-bold text-slate-800">Add Volunteer</h2>
+        {err && <p className="text-xs text-red-600 font-semibold">{err}</p>}
         <input className="w-full border rounded px-3 py-2 text-sm" placeholder="Name" value={name} onChange={(e) => setName(e.target.value)} required />
         <input className="w-full border rounded px-3 py-2 text-sm" placeholder="Email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
         <input className="w-full border rounded px-3 py-2 text-sm" placeholder="Phone (optional)" value={phone} onChange={(e) => setPhone(e.target.value)} />
         <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={scanAtt} onChange={(e) => setScanAtt(e.target.checked)} /> SCAN_ATTENDANCE</label>
         <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={scanRes} onChange={(e) => setScanRes(e.target.checked)} /> SCAN_RESOURCE</label>
         <button className="bg-primary-600 text-white text-xs font-bold px-4 py-2 rounded">Create volunteer</button>
-        {token && <p className="text-xs">Setup: /setup-password?token={token}</p>}
+        {created && (
+          <div className="bg-emerald-50 border border-emerald-200 rounded p-3 text-xs text-emerald-800 space-y-1">
+            <p className="font-bold">Volunteer created.</p>
+            <p>
+              They sign in with <span className="font-mono">{created}</span> and their{' '}
+              <span className="font-bold">email address as the initial password</span>. They must set a new
+              password on first login before they can use the portal.
+            </p>
+            {token && <p className="text-[11px] text-emerald-700">Alternative setup link: /setup-password?token={token}</p>}
+          </div>
+        )}
       </form>
       <div className="bg-white border rounded-xl p-6">
         <h3 className="font-bold text-sm mb-3">Assigned volunteers</h3>

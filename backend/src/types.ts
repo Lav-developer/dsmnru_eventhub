@@ -19,6 +19,14 @@ export interface User {
   created_at: string;
   updated_at: string;
   department_id?: string | null;
+  /** 1 once the user has chosen their own password (never the provisioned default). */
+  password_set?: boolean;
+  /**
+   * True while the account still uses its provisioned email-as-password and
+   * must change it before reaching any authenticated route. Server-side truth;
+   * never trust a client-supplied value.
+   */
+  force_password_change?: boolean;
 }
 
 export interface Session {

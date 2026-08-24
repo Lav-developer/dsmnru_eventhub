@@ -633,6 +633,8 @@ async function main() {
   testProvisionedUsersStartActive();
   await testSetupTokenSingleUseAndExpiry();
   await testFullHierarchyAuthorization();
+  const { runOnboardingTests } = await import('./onboarding_tests');
+  await runOnboardingTests();
   console.log('\n==================================================');
   console.log('🎉 ALL INTEGRATION & PRODUCTION-HARDENING TESTS PASSED!');
   console.log('==================================================');

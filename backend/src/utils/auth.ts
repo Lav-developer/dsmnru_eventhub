@@ -53,7 +53,7 @@ export async function authenticate(c: Context<HonoTypes>, next: Next) {
     // Fetch user
     const user = await db
       .prepare(
-        'SELECT id, email, full_name, role, status, phone, created_at, updated_at FROM users WHERE id = ?'
+        'SELECT id, email, full_name, role, status, phone, created_at, updated_at, password_set, force_password_change FROM users WHERE id = ?'
       )
       .bind(session.user_id)
       .first<any>();
@@ -76,7 +76,9 @@ export async function authenticate(c: Context<HonoTypes>, next: Next) {
       status: user.status as any,
       phone: user.phone || undefined,
       created_at: user.created_at,
-      updated_at: user.updated_at
+      updated_at: user.updated_at,
+      password_set: Number(user.password_set) === 1,
+      force_password_change: Number(user.force_password_change) === 1
     };
 
     c.set('user', typedUser);
@@ -90,11 +92,36 @@ export async function authenticate(c: Context<HonoTypes>, next: Next) {
   await next();
 }
 
-export function requireAuth(allowedRoles?: UserRole[]) {
+/**
+ * Blocks a first-login session (provisioned email-as-password still active)
+ * from reaching any normal authenticated route.
+ *
+ * This is enforced here, in the shared middleware, rather than per-route, so a
+ * forced password change cannot be bypassed by calling an API directly. The
+ * only endpoints that may be reached while gated are the ones explicitly
+ * exempted in requireAuth (the change-password flow itself, /auth/me and
+ * /auth/logout).
+ */
+export function assertPasswordChangeNotRequired(user: User) {
+  if (user.force_password_change) {
+    throw new AppError(
+      'You must change your password before continuing.',
+      'PASSWORD_CHANGE_REQUIRED',
+      403
+    );
+  }
+}
+
+export function requireAuth(allowedRoles?: UserRole[], options?: { allowPasswordChangePending?: boolean }) {
   return async (c: Context<HonoTypes>, next: Next) => {
     const user = c.get('user');
     if (!user) {
       throw new AppError('Unauthorized: Authentication required', 'UNAUTHORIZED', 401);
+    }
+
+    // Server-side forced-password-change gate. Never trust frontend flags.
+    if (!options?.allowPasswordChangePending) {
+      assertPasswordChangeNotRequired(user);
     }
 
     if (allowedRoles && !allowedRoles.includes(user.role)) {
