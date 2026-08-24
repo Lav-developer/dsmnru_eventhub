@@ -371,6 +371,157 @@ function testMigrationsDoNotDuplicatePasswordSet() {
   console.log('✅ Test 13 Passed!');
 }
 
+function testMigration0003RepairsPasswordSet() {
+  console.log('\nRunning Test 17: 0003 migration repairs users.password_set drift...');
+  const three = readFileSync(resolve(process.cwd(), 'migrations/0003_add_password_set.sql'), 'utf8');
+
+  if (!/ALTER TABLE users ADD COLUMN password_set INTEGER NOT NULL DEFAULT 0/.test(three)) {
+    throw new Error('0003 must add password_set INTEGER NOT NULL DEFAULT 0 to users');
+  }
+  // A table rebuild would fire ON DELETE CASCADE and destroy membership/session rows.
+  if (/DROP TABLE\s+users\b/i.test(three) || /ALTER TABLE\s+users\s+RENAME/i.test(three)) {
+    throw new Error('0003 must not rebuild/rename the users table (cascades destroy child rows)');
+  }
+  // 0001/0002 history must not be rewritten again.
+  const one = readFileSync(resolve(process.cwd(), 'migrations/0001_schema.sql'), 'utf8');
+  if (!/password_set INTEGER NOT NULL DEFAULT 0/.test(one)) {
+    throw new Error('0001_schema.sql must keep password_set for fresh databases');
+  }
+  console.log('✅ Test 17 Passed!');
+}
+
+async function testMigrationPlanReconciliation() {
+  console.log('\nRunning Test 18: 0003 apply-plan handles fresh vs legacy databases...');
+  const { planPasswordSetReconcile } = await import('../../scripts/migrate-plan.mjs' as string);
+
+  // Legacy production database: 0001/0002 applied, column missing -> must run.
+  const legacy = planPasswordSetReconcile({
+    usersTableExists: true,
+    passwordSetColumnExists: false,
+    alreadyRecorded: false
+  });
+  if (legacy !== 'run-migration') throw new Error('Legacy DB missing the column must run 0003');
+
+  // Fresh database: 0001 creates the column, so executing 0003 would be a duplicate.
+  const fresh = planPasswordSetReconcile({
+    usersTableExists: false,
+    passwordSetColumnExists: false,
+    alreadyRecorded: false
+  });
+  if (fresh !== 'mark-applied') throw new Error('Fresh DB must record 0003 without executing it');
+
+  // Column already present (e.g. re-provisioned dev DB) -> must not ALTER again.
+  const present = planPasswordSetReconcile({
+    usersTableExists: true,
+    passwordSetColumnExists: true,
+    alreadyRecorded: false
+  });
+  if (present !== 'mark-applied') throw new Error('Existing column must not be re-added');
+
+  // Idempotency.
+  const done = planPasswordSetReconcile({
+    usersTableExists: true,
+    passwordSetColumnExists: true,
+    alreadyRecorded: true
+  });
+  if (done !== 'already-recorded') throw new Error('Applying twice must be a no-op');
+
+  console.log('✅ Test 18 Passed!');
+}
+
+async function testMigrationsProduceIdenticalSchema() {
+  console.log('\nRunning Test 19: fresh and repaired legacy DBs converge on identical schema...');
+  const { DatabaseSync } = await import('node:sqlite');
+  const { planPasswordSetReconcile } = await import('../../scripts/migrate-plan.mjs' as string);
+
+  const migrationsDir = resolve(process.cwd(), 'migrations');
+  const sql0001 = readFileSync(resolve(migrationsDir, '0001_schema.sql'), 'utf8');
+  const sql0002 = readFileSync(resolve(migrationsDir, '0002_rbac.sql'), 'utf8');
+  const sql0003 = readFileSync(resolve(migrationsDir, '0003_add_password_set.sql'), 'utf8');
+
+  const columnsOf = (db: any) =>
+    db
+      .prepare('PRAGMA table_info(users)')
+      .all()
+      .map((r: any) => r.name)
+      .sort()
+      .join(',');
+
+  const hasColumn = (db: any) =>
+    db.prepare("SELECT COUNT(*) c FROM pragma_table_info('users') WHERE name='password_set'").get().c > 0;
+
+  const applyGuarded = (db: any) => {
+    const plan = planPasswordSetReconcile({
+      usersTableExists:
+        db.prepare("SELECT COUNT(*) c FROM sqlite_master WHERE type='table' AND name='users'").get().c > 0,
+      passwordSetColumnExists: hasColumn(db),
+      alreadyRecorded: false
+    });
+    if (plan === 'run-migration') db.exec(sql0003);
+    return plan;
+  };
+
+  // --- Fresh database: 0001 -> 0002 -> 0003 ---
+  const fresh: any = new DatabaseSync(':memory:');
+  fresh.exec(sql0001);
+  fresh.exec(sql0002);
+  if (applyGuarded(fresh) !== 'mark-applied') {
+    throw new Error('Fresh DB should not execute the ALTER (0001 already defines the column)');
+  }
+  if (!hasColumn(fresh)) throw new Error('Fresh DB must end up with password_set');
+
+  // --- Legacy database: 0001 as originally applied (no password_set) -> 0002 -> 0003 ---
+  const legacy: any = new DatabaseSync(':memory:');
+  legacy.exec(sql0001.replace('  password_set INTEGER NOT NULL DEFAULT 0,\n', ''));
+  legacy.exec(sql0002);
+  if (hasColumn(legacy)) throw new Error('Legacy fixture should start without password_set');
+
+  // Seed data that ON DELETE CASCADE would destroy if 0003 rebuilt the table.
+  legacy.exec(`
+    INSERT INTO departments (id,name,code) VALUES ('d1','Computer Science','CS');
+    INSERT INTO users (id,email,password_hash,full_name,role,status)
+      VALUES ('u-old','old@dsmnru.test','hash','Legacy DH','department_head','active');
+    INSERT INTO department_members (department_id,user_id) VALUES ('d1','u-old');
+    INSERT INTO sessions (id,user_id,token,expires_at) VALUES ('s1','u-old','tok','2099-01-01T00:00:00Z');
+  `);
+
+  if (applyGuarded(legacy) !== 'run-migration') {
+    throw new Error('Legacy DB must execute 0003 to add the missing column');
+  }
+  if (!hasColumn(legacy)) throw new Error('Legacy DB must gain password_set via 0003');
+
+  // No data loss.
+  if (legacy.prepare('SELECT COUNT(*) c FROM department_members').get().c !== 1) {
+    throw new Error('0003 destroyed department_members rows');
+  }
+  if (legacy.prepare('SELECT COUNT(*) c FROM sessions').get().c !== 1) {
+    throw new Error('0003 destroyed sessions rows');
+  }
+
+  // Both paths converge on the same users schema.
+  if (columnsOf(fresh) !== columnsOf(legacy)) {
+    throw new Error(`Schema mismatch:\n  fresh:  ${columnsOf(fresh)}\n  legacy: ${columnsOf(legacy)}`);
+  }
+
+  // The real staff.ts INSERT must work against both.
+  for (const [label, db] of [
+    ['fresh', fresh],
+    ['legacy', legacy]
+  ] as const) {
+    db.exec(`INSERT OR IGNORE INTO departments (id,name,code) VALUES ('d-x','Dept X','DX');`);
+    db.prepare(
+      `INSERT INTO users (id, email, password_hash, full_name, phone, role, status, password_set)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 0)`
+    ).run(`dh-${label}`, `dh-${label}@dsmnru.test`, 'hash', 'New DH', null, 'department_head', 'active');
+    const row: any = db.prepare('SELECT password_set FROM users WHERE id = ?').get(`dh-${label}`);
+    if (row.password_set !== 0) {
+      throw new Error(`Department Head creation on ${label} DB produced password_set=${row.password_set}`);
+    }
+  }
+
+  console.log('✅ Test 19 Passed!');
+}
+
 function testProvisionedUsersStartActive() {
   console.log('\nRunning Test 14: Provisioned staff are active immediately; setup-password remains...');
   const staff = readFileSync(resolve(process.cwd(), 'src/routes/staff.ts'), 'utf8');
@@ -476,6 +627,9 @@ async function main() {
   testCoordinatorCreateAllowedInRoute();
   testSchemaRelationships();
   testMigrationsDoNotDuplicatePasswordSet();
+  testMigration0003RepairsPasswordSet();
+  await testMigrationPlanReconciliation();
+  await testMigrationsProduceIdenticalSchema();
   testProvisionedUsersStartActive();
   await testSetupTokenSingleUseAndExpiry();
   await testFullHierarchyAuthorization();

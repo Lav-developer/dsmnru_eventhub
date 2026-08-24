@@ -19,9 +19,18 @@ Deploy the SQLite schema migrations to your remote Cloudflare D1 instance:
 npx wrangler d1 create dsmnru-eventhub-db
 
 # Apply SQL migrations to production database
-npx wrangler d1 migrations apply dsmnru-eventhub-db --remote
+npm run db:migrate -- --remote
 ```
 Make sure to copy the `database_id` returned by wrangler and update it under `[[d1_databases]]` inside your production config.
+
+> **Always migrate with `npm run db:migrate`, not a bare `wrangler d1 migrations apply`.**
+> `0003_add_password_set.sql` repairs databases that were created before
+> `users.password_set` was added to `0001_schema.sql`. Because SQLite/D1 has no
+> `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, the runner inspects the live schema
+> first and either executes `0003` (legacy databases missing the column) or records
+> it as applied without executing it (fresh databases, where `0001` already creates
+> the column). It then verifies `users.password_set` exists and fails loudly if not.
+> See [Database Schema](database.md#schema-drift-repair-0003) for details.
 
 ### 2. Backend Workers Deployment
 Deploy your API logic as a global Worker:
