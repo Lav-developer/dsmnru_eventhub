@@ -80,16 +80,24 @@ export class SqliteD1 {
     const files = readdirSync(migrationsDir)
       .filter((f) => f.endsWith('.sql'))
       .sort();
+    // NOTE: no error is swallowed here, deliberately.
+    //
+    // This used to skip "duplicate column name" failures, which made the suite
+    // pass while `wrangler d1 migrations apply` was aborting the real chain at
+    // 0003 and silently never applying 0004 — the cause of the
+    // "no such column: force_password_change" outage. Failing loudly here is
+    // what makes a migration that cannot survive a plain wrangler run a test
+    // failure instead of a production incident.
     for (const f of files) {
       const sql = readFileSync(resolve(migrationsDir, f), 'utf8');
       try {
         this.db.exec(sql);
       } catch (err: any) {
-        // 0003 repairs legacy drift; on a fresh database 0001 already defines
-        // password_set, so a duplicate-column error here is expected and is
-        // exactly what scripts/migrate.mjs avoids by recording it instead.
-        if (/duplicate column name/i.test(err?.message || '')) continue;
-        throw new Error(`Migration ${f} failed: ${err.message}`);
+        throw new Error(
+          `Migration ${f} failed: ${err.message}\n` +
+            'Every migration must apply cleanly to a fresh database with a plain ' +
+            '`wrangler d1 migrations apply` — wrangler aborts the whole chain on the first error.'
+        );
       }
     }
   }

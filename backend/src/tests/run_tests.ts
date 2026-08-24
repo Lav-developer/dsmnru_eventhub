@@ -5,6 +5,7 @@ import { sanitizeCSVCell, parseCSV } from '../utils/csv';
 import { authorizeCreateEvent, authorizeEventAction, checkEventAuthority } from '../utils/authorize';
 import { AppError } from '../utils/errors';
 import { User } from '../types';
+import { freshDb } from './onboarding_tests';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -372,11 +373,22 @@ function testMigrationsDoNotDuplicatePasswordSet() {
 }
 
 function testMigration0003RepairsPasswordSet() {
-  console.log('\nRunning Test 17: 0003 migration repairs users.password_set drift...');
+  console.log('\nRunning Test 17: 0003 backfills password_set without unguardable DDL...');
   const three = readFileSync(resolve(process.cwd(), 'migrations/0003_add_password_set.sql'), 'utf8');
 
-  if (!/ALTER TABLE users ADD COLUMN password_set INTEGER NOT NULL DEFAULT 0/.test(three)) {
-    throw new Error('0003 must add password_set INTEGER NOT NULL DEFAULT 0 to users');
+  // The ALTER used to live here. On a fresh database 0001 already defines the
+  // column, so it raised "duplicate column name" and wrangler aborted the
+  // whole chain — which is why 0004 never ran in production. Adding the column
+  // is now the reconciler's job (RECONCILED_COLUMNS in migrate-plan.mjs),
+  // because only it can check the schema first.
+  if (/ALTER TABLE\s+users\s+ADD COLUMN\s+password_set/i.test(three)) {
+    throw new Error(
+      '0003 must not ALTER ADD COLUMN password_set: it duplicates 0001 on a fresh database and aborts the migration chain'
+    );
+  }
+  // It must still perform the backfill.
+  if (!/UPDATE users/i.test(three) || !/password_set\s*=\s*1/i.test(three)) {
+    throw new Error('0003 must still backfill password_set = 1 for pre-provisioning accounts');
   }
   // A table rebuild would fire ON DELETE CASCADE and destroy membership/session rows.
   if (/DROP TABLE\s+users\b/i.test(three) || /ALTER TABLE\s+users\s+RENAME/i.test(three)) {
@@ -390,41 +402,60 @@ function testMigration0003RepairsPasswordSet() {
   console.log('✅ Test 17 Passed!');
 }
 
+/**
+ * The regression that caused the outage: every migration must apply cleanly,
+ * in order, to a fresh database — because `wrangler d1 migrations apply` stops
+ * at the first failure and silently skips everything after it.
+ */
+function testMigrationChainAppliesCleanlyOnFreshDb() {
+  console.log('\nRunning Test 17b: full migration chain applies cleanly to a fresh database...');
+  const ctx = freshDb(); // throws if any migration fails
+
+  const columns = ctx.d1.db
+    .prepare('PRAGMA table_info(users)')
+    .all()
+    .map((r: any) => r.name);
+
+  for (const required of ['password_set', 'force_password_change']) {
+    if (!columns.includes(required)) {
+      throw new Error(
+        `users.${required} is missing after applying every migration — the chain did not complete`
+      );
+    }
+  }
+  console.log('✅ Test 17b Passed!');
+}
+
 async function testMigrationPlanReconciliation() {
-  console.log('\nRunning Test 18: 0003 apply-plan handles fresh vs legacy databases...');
-  const { planPasswordSetReconcile } = await import('../../scripts/migrate-plan.mjs' as string);
+  console.log('\nRunning Test 18: column reconciler handles fresh vs legacy databases...');
+  const { planColumnReconcile, RECONCILED_COLUMNS } = await import(
+    '../../scripts/migrate-plan.mjs' as string
+  );
 
-  // Legacy production database: 0001/0002 applied, column missing -> must run.
-  const legacy = planPasswordSetReconcile({
-    usersTableExists: true,
-    passwordSetColumnExists: false,
-    alreadyRecorded: false
-  });
-  if (legacy !== 'run-migration') throw new Error('Legacy DB missing the column must run 0003');
+  // Legacy production database: table exists, column missing -> must be added.
+  if (planColumnReconcile({ tableExists: true, columnExists: false }) !== 'add-column') {
+    throw new Error('Legacy DB missing the column must have it added');
+  }
 
-  // Fresh database: 0001 creates the column, so executing 0003 would be a duplicate.
-  const fresh = planPasswordSetReconcile({
-    usersTableExists: false,
-    passwordSetColumnExists: false,
-    alreadyRecorded: false
-  });
-  if (fresh !== 'mark-applied') throw new Error('Fresh DB must record 0003 without executing it');
+  // Fresh database: the schema migration will create it, so do nothing.
+  if (planColumnReconcile({ tableExists: false, columnExists: false }) !== 'skip-fresh-database') {
+    throw new Error('Fresh DB must not be pre-patched');
+  }
 
-  // Column already present (e.g. re-provisioned dev DB) -> must not ALTER again.
-  const present = planPasswordSetReconcile({
-    usersTableExists: true,
-    passwordSetColumnExists: true,
-    alreadyRecorded: false
-  });
-  if (present !== 'mark-applied') throw new Error('Existing column must not be re-added');
+  // Already present (e.g. re-provisioned dev DB) -> must not ALTER again.
+  if (planColumnReconcile({ tableExists: true, columnExists: true }) !== 'already-present') {
+    throw new Error('Existing column must not be re-added');
+  }
 
-  // Idempotency.
-  const done = planPasswordSetReconcile({
-    usersTableExists: true,
-    passwordSetColumnExists: true,
-    alreadyRecorded: true
-  });
-  if (done !== 'already-recorded') throw new Error('Applying twice must be a no-op');
+  // Every reconciled column must be additive and non-destructive.
+  for (const target of RECONCILED_COLUMNS) {
+    if (!/^ALTER TABLE \w+ ADD COLUMN /i.test(target.ddl)) {
+      throw new Error(`Reconciled column ${target.column} must use ALTER TABLE ... ADD COLUMN`);
+    }
+    if (/DROP|RENAME/i.test(target.ddl)) {
+      throw new Error(`Reconciled column ${target.column} must never drop or rename anything`);
+    }
+  }
 
   console.log('✅ Test 18 Passed!');
 }
@@ -432,12 +463,16 @@ async function testMigrationPlanReconciliation() {
 async function testMigrationsProduceIdenticalSchema() {
   console.log('\nRunning Test 19: fresh and repaired legacy DBs converge on identical schema...');
   const { DatabaseSync } = await import('node:sqlite');
-  const { planPasswordSetReconcile } = await import('../../scripts/migrate-plan.mjs' as string);
+  const { planColumnReconcile, RECONCILED_COLUMNS } = await import(
+    '../../scripts/migrate-plan.mjs' as string
+  );
 
   const migrationsDir = resolve(process.cwd(), 'migrations');
-  const sql0001 = readFileSync(resolve(migrationsDir, '0001_schema.sql'), 'utf8');
-  const sql0002 = readFileSync(resolve(migrationsDir, '0002_rbac.sql'), 'utf8');
-  const sql0003 = readFileSync(resolve(migrationsDir, '0003_add_password_set.sql'), 'utf8');
+  const sqlFor = (f: string) => readFileSync(resolve(migrationsDir, f), 'utf8');
+  const sql0001 = sqlFor('0001_schema.sql');
+  const sql0002 = sqlFor('0002_rbac.sql');
+  const sql0003 = sqlFor('0003_add_password_set.sql');
+  const sql0004 = sqlFor('0004_force_password_change.sql');
 
   const columnsOf = (db: any) =>
     db
@@ -447,36 +482,50 @@ async function testMigrationsProduceIdenticalSchema() {
       .sort()
       .join(',');
 
-  const hasColumn = (db: any) =>
-    db.prepare("SELECT COUNT(*) c FROM pragma_table_info('users') WHERE name='password_set'").get().c > 0;
+  const hasColumn = (db: any, column: string) =>
+    db
+      .prepare(`SELECT COUNT(*) c FROM pragma_table_info('users') WHERE name='${column}'`)
+      .get().c > 0;
 
-  const applyGuarded = (db: any) => {
-    const plan = planPasswordSetReconcile({
-      usersTableExists:
-        db.prepare("SELECT COUNT(*) c FROM sqlite_master WHERE type='table' AND name='users'").get().c > 0,
-      passwordSetColumnExists: hasColumn(db),
-      alreadyRecorded: false
-    });
-    if (plan === 'run-migration') db.exec(sql0003);
-    return plan;
+  // Mirrors scripts/migrate.mjs: reconcile drift columns first, then run every
+  // migration file unconditionally, exactly as wrangler would.
+  const reconcileThenMigrate = (db: any) => {
+    for (const target of RECONCILED_COLUMNS) {
+      const plan = planColumnReconcile({
+        tableExists:
+          db
+            .prepare(
+              `SELECT COUNT(*) c FROM sqlite_master WHERE type='table' AND name='${target.table}'`
+            )
+            .get().c > 0,
+        columnExists: hasColumn(db, target.column)
+      });
+      if (plan === 'add-column') db.exec(target.ddl);
+    }
+    // These must never throw — wrangler aborts the chain on the first failure.
+    db.exec(sql0003);
+    db.exec(sql0004);
   };
 
-  // --- Fresh database: 0001 -> 0002 -> 0003 ---
+  // --- Fresh database: 0001 -> 0002 -> reconcile -> 0003 -> 0004 ---
   const fresh: any = new DatabaseSync(':memory:');
   fresh.exec(sql0001);
   fresh.exec(sql0002);
-  if (applyGuarded(fresh) !== 'mark-applied') {
-    throw new Error('Fresh DB should not execute the ALTER (0001 already defines the column)');
+  reconcileThenMigrate(fresh);
+  if (!hasColumn(fresh, 'password_set')) throw new Error('Fresh DB must end up with password_set');
+  if (!hasColumn(fresh, 'force_password_change')) {
+    throw new Error('Fresh DB must end up with force_password_change');
   }
-  if (!hasColumn(fresh)) throw new Error('Fresh DB must end up with password_set');
 
-  // --- Legacy database: 0001 as originally applied (no password_set) -> 0002 -> 0003 ---
+  // --- Legacy database: 0001 as originally applied (no password_set) -> 0002 ---
   const legacy: any = new DatabaseSync(':memory:');
   legacy.exec(sql0001.replace('  password_set INTEGER NOT NULL DEFAULT 0,\n', ''));
   legacy.exec(sql0002);
-  if (hasColumn(legacy)) throw new Error('Legacy fixture should start without password_set');
+  if (hasColumn(legacy, 'password_set')) {
+    throw new Error('Legacy fixture should start without password_set');
+  }
 
-  // Seed data that ON DELETE CASCADE would destroy if 0003 rebuilt the table.
+  // Seed data that ON DELETE CASCADE would destroy if the repair rebuilt the table.
   legacy.exec(`
     INSERT INTO departments (id,name,code) VALUES ('d1','Computer Science','CS');
     INSERT INTO users (id,email,password_hash,full_name,role,status)
@@ -485,17 +534,31 @@ async function testMigrationsProduceIdenticalSchema() {
     INSERT INTO sessions (id,user_id,token,expires_at) VALUES ('s1','u-old','tok','2099-01-01T00:00:00Z');
   `);
 
-  if (applyGuarded(legacy) !== 'run-migration') {
-    throw new Error('Legacy DB must execute 0003 to add the missing column');
+  reconcileThenMigrate(legacy);
+  if (!hasColumn(legacy, 'password_set')) throw new Error('Legacy DB must gain password_set');
+  if (!hasColumn(legacy, 'force_password_change')) {
+    throw new Error('Legacy DB must gain force_password_change');
   }
-  if (!hasColumn(legacy)) throw new Error('Legacy DB must gain password_set via 0003');
 
   // No data loss.
   if (legacy.prepare('SELECT COUNT(*) c FROM department_members').get().c !== 1) {
-    throw new Error('0003 destroyed department_members rows');
+    throw new Error('Migration destroyed department_members rows');
   }
   if (legacy.prepare('SELECT COUNT(*) c FROM sessions').get().c !== 1) {
-    throw new Error('0003 destroyed sessions rows');
+    throw new Error('Migration destroyed sessions rows');
+  }
+
+  // A pre-existing account must stay usable and must NOT be forced to change
+  // its password: it never had a setup token, so 0003 backfills password_set=1
+  // and 0004 therefore leaves force_password_change at 0.
+  const legacyUser: any = legacy
+    .prepare('SELECT password_set, force_password_change FROM users WHERE id = ?')
+    .get('u-old');
+  if (legacyUser.password_set !== 1) {
+    throw new Error('Pre-existing account should be backfilled to password_set=1');
+  }
+  if (legacyUser.force_password_change !== 0) {
+    throw new Error('Pre-existing account must NOT be forced to change its password');
   }
 
   // Both paths converge on the same users schema.
@@ -628,6 +691,7 @@ async function main() {
   testSchemaRelationships();
   testMigrationsDoNotDuplicatePasswordSet();
   testMigration0003RepairsPasswordSet();
+  testMigrationChainAppliesCleanlyOnFreshDb();
   await testMigrationPlanReconciliation();
   await testMigrationsProduceIdenticalSchema();
   testProvisionedUsersStartActive();
@@ -635,6 +699,8 @@ async function main() {
   await testFullHierarchyAuthorization();
   const { runOnboardingTests } = await import('./onboarding_tests');
   await runOnboardingTests();
+  const { runRegressionTests } = await import('./regression_tests');
+  await runRegressionTests();
   console.log('\n==================================================');
   console.log('🎉 ALL INTEGRATION & PRODUCTION-HARDENING TESTS PASSED!');
   console.log('==================================================');

@@ -2,6 +2,59 @@ import { Context, Next } from 'hono';
 import { AppError } from './errors';
 import { User, UserRole, HonoTypes } from '../types';
 
+/** Columns that exist only after the later migrations have been applied. */
+const OPTIONAL_USER_FLAGS = ['password_set', 'force_password_change'] as const;
+
+const BASE_USER_COLUMNS =
+  'id, email, full_name, role, status, phone, created_at, updated_at';
+
+function isMissingColumnError(err: unknown, column: string): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /no such column/i.test(message) && message.includes(column);
+}
+
+/**
+ * Load a user, tolerating a database that has not yet applied the migrations
+ * adding password_set / force_password_change.
+ *
+ * Security note: a flag that cannot be read falls back to 0 (false), i.e. the
+ * *permissive* value. That is deliberate and safe — both flags only ever add
+ * restrictions (they gate a forced password change). Defaulting them to 1 on a
+ * lagging database would lock every user out of the product instead. Any error
+ * that is NOT a missing optional column is re-thrown and becomes a 500.
+ */
+async function selectUserTolerantOfMissingFlags(
+  db: D1Database,
+  userId: string
+): Promise<any> {
+  const available = [...OPTIONAL_USER_FLAGS];
+
+  // Retry at most once per optional flag, dropping whichever one D1 rejects.
+  for (let attempt = 0; attempt <= OPTIONAL_USER_FLAGS.length; attempt++) {
+    const columns = [BASE_USER_COLUMNS, ...available].join(', ');
+    try {
+      return await db
+        .prepare(`SELECT ${columns} FROM users WHERE id = ?`)
+        .bind(userId)
+        .first<any>();
+    } catch (err) {
+      const missing = available.find((flag) => isMissingColumnError(err, flag));
+      if (!missing) throw err;
+
+      console.error(
+        `[Schema] users.${missing} is missing — treating it as 0 and continuing. ` +
+          'Run `npm run db:migrate` to apply the outstanding migrations.'
+      );
+      available.splice(available.indexOf(missing), 1);
+    }
+  }
+
+  return await db
+    .prepare(`SELECT ${BASE_USER_COLUMNS} FROM users WHERE id = ?`)
+    .bind(userId)
+    .first<any>();
+}
+
 export async function authenticate(c: Context<HonoTypes>, next: Next) {
   const db = c.env.DB;
   
@@ -50,13 +103,15 @@ export async function authenticate(c: Context<HonoTypes>, next: Next) {
       return await next();
     }
 
-    // Fetch user
-    const user = await db
-      .prepare(
-        'SELECT id, email, full_name, role, status, phone, created_at, updated_at, password_set, force_password_change FROM users WHERE id = ?'
-      )
-      .bind(session.user_id)
-      .first<any>();
+    // Fetch user.
+    //
+    // password_set and force_password_change are additive columns introduced by
+    // later migrations. If a database is running behind its migrations, asking
+    // for them raises "no such column" and would otherwise turn EVERY
+    // authenticated request — including unrelated GETs such as /events — into a
+    // 500. Authentication itself does not depend on those flags, so a missing
+    // one degrades to its default instead of taking the request down.
+    const user = await selectUserTolerantOfMissingFlags(db, session.user_id);
 
     if (!user || user.status !== 'active') {
       if (user && user.status === 'suspended') {
@@ -84,9 +139,19 @@ export async function authenticate(c: Context<HonoTypes>, next: Next) {
     c.set('user', typedUser);
     c.set('session', session);
   } catch (err) {
-    console.error('Auth middleware error:', err);
-    c.set('user', null);
-    c.set('session', null);
+    // A failure here is an infrastructure fault (schema drift, unavailable D1),
+    // never a statement about who the caller is. Silently continuing as
+    // anonymous would be worse than failing: an authenticated coordinator would
+    // be quietly downgraded and shown the public event list, which looks
+    // exactly like "my events disappeared". Surface it as a 500 carrying the
+    // request id instead, and let the caller retry.
+    const requestId = c.get('requestId');
+    console.error(`Auth middleware error (requestId=${requestId}):`, err);
+    throw new AppError(
+      'Could not verify your session. Please try again.',
+      'AUTH_UNAVAILABLE',
+      500
+    );
   }
 
   await next();

@@ -6,7 +6,8 @@ import {
   Link,
   useParams,
   useNavigate,
-  useSearchParams
+  useSearchParams,
+  useLocation
 } from 'react-router-dom';
 import {
   Calendar,
@@ -39,8 +40,14 @@ import {
   
   Briefcase,
   ChevronRight,
-  UserPlus
+  UserPlus,
+  Printer,
+  MapPin,
+  Clock,
+  ShieldCheck,
+  LifeBuoy
 } from 'lucide-react';
+import QRCode from 'qrcode';
 import { apiRequest } from './utils/api';
 import { jsPDF } from 'jspdf';
 import JSZip from 'jszip';
@@ -93,6 +100,20 @@ interface Event {
   status: 'DRAFT' | 'PUBLISHED' | 'REGISTRATION_OPEN' | 'REGISTRATION_CLOSED' | 'ONGOING' | 'COMPLETED' | 'ARCHIVED';
   google_drive_folder_url?: string;
   created_at: string;
+}
+
+/**
+ * Shape returned by GET /events. It is paginated — never a bare Event[].
+ * Declared once so no call site can silently mistype it again.
+ */
+interface EventListResponse {
+  events: Event[];
+  pagination: {
+    page: number;
+    limit: number;
+    total: number;
+    totalPages: number;
+  };
 }
 
 interface Participant {
@@ -254,6 +275,7 @@ export default function App() {
             <Route path="/setup-password" element={<SetupPassword />} />
             <Route path="/change-password" element={<ChangePassword currentUser={currentUser} setCurrentUser={setCurrentUser} />} />
             <Route path="/events/:slug" element={<EventPage />} />
+            <Route path="/pass/:token" element={<EntryPassPage />} />
             <Route path="/verify/:certificateId" element={<CertificateVerifyPage />} />
             <Route
               path="/dashboard/*"
@@ -973,6 +995,354 @@ function Register() {
 }
 
 // ==========================================
+// REGISTRATION CONFIRMATION + ENTRY PASS (QR)
+// ==========================================
+
+interface RegistrationEventDetails {
+  id: string;
+  name: string;
+  short_name?: string;
+  start_date?: string;
+  end_date?: string;
+  start_time?: string;
+  end_time?: string;
+  venue?: string;
+  format?: string;
+  meeting_link?: string | null;
+}
+
+interface RegistrationResult {
+  /** Opaque, server-generated pass token. Never a participant id. */
+  id: string;
+  registrationId: string;
+  full_name?: string;
+  event?: RegistrationEventDetails;
+}
+
+function formatEventWhen(evt?: RegistrationEventDetails): string | null {
+  if (!evt?.start_date) return null;
+  const time = [evt.start_time, evt.end_time].filter(Boolean).join(' – ');
+  const sameDay = !evt.end_date || evt.end_date === evt.start_date;
+  const dates = sameDay ? evt.start_date : `${evt.start_date} → ${evt.end_date}`;
+  return time ? `${dates}, ${time}` : dates;
+}
+
+/**
+ * Renders the participant's entry pass as a real, scannable QR code.
+ *
+ * The encoded payload is ONLY the opaque pass token issued by the server for
+ * this specific registration — no name, email, phone or any other personal
+ * data is placed inside the QR, so a photographed pass leaks nothing. The
+ * token is also not derived from any client-supplied identifier.
+ */
+function EntryPassQR({
+  registration,
+  eventName
+}: {
+  registration: RegistrationResult;
+  eventName: string;
+}) {
+  const [dataUrl, setDataUrl] = useState<string | null>(null);
+  const [qrError, setQrError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    QRCode.toDataURL(registration.id, {
+      errorCorrectionLevel: 'M',
+      margin: 2,
+      width: 512
+    })
+      .then((url) => {
+        if (!cancelled) {
+          setDataUrl(url);
+          setQrError(null);
+        }
+      })
+      .catch((err: any) => {
+        if (!cancelled) setQrError(err?.message || 'Could not render your QR code.');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [registration.id]);
+
+  const fileName = `entry-pass-${registration.registrationId}.png`;
+
+  const handlePrint = () => {
+    if (!dataUrl) return;
+    const win = window.open('', '_blank', 'width=640,height=800');
+    if (!win) {
+      alert('Please allow pop-ups to print your pass, or download it instead.');
+      return;
+    }
+    const esc = (s: string) => s.replace(/[<>&]/g, (ch) => `&#${ch.charCodeAt(0)};`);
+    win.document.write(`<!doctype html><html><head><title>Entry Pass ${esc(
+      registration.registrationId
+    )}</title></head>
+      <body style="font-family:system-ui,sans-serif;text-align:center;padding:32px;">
+        <h2 style="margin:0 0 4px;">${esc(eventName)}</h2>
+        <p style="margin:0 0 2px;font-size:14px;">${esc(registration.full_name || '')}</p>
+        <p style="margin:0 0 16px;font-family:monospace;font-size:14px;">${esc(
+          registration.registrationId
+        )}</p>
+        <img src="${dataUrl}" alt="Entry pass QR code" style="width:280px;height:280px;" />
+        <p style="margin-top:16px;font-size:12px;color:#555;">
+          Show this QR at the entry scanner. Do not share it with anyone.
+        </p>
+        <script>window.onload = function(){ window.focus(); window.print(); };<\/script>
+      </body></html>`);
+    win.document.close();
+  };
+
+  return (
+    <div className="bg-white border border-slate-200 rounded-xl p-5 flex flex-col items-center space-y-3">
+      <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">
+        Your Secure Entry QR Pass
+      </span>
+
+      {qrError ? (
+        <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-red-700 text-xs text-center space-y-1">
+          <AlertTriangle className="w-5 h-5 mx-auto" />
+          <p className="font-semibold">{qrError}</p>
+          <p>
+            Your registration is safe. Quote{' '}
+            <span className="font-mono font-bold">{registration.registrationId}</span> at the help
+            desk to have your pass re-issued.
+          </p>
+        </div>
+      ) : dataUrl ? (
+        <img
+          src={dataUrl}
+          alt={`Entry pass QR code for registration ${registration.registrationId}`}
+          className="w-44 h-44 rounded border border-slate-200"
+        />
+      ) : (
+        <div className="w-44 h-44 flex items-center justify-center rounded border border-dashed border-slate-300">
+          <RefreshCw className="w-6 h-6 text-slate-400 animate-spin" />
+        </div>
+      )}
+
+      {dataUrl && !qrError && (
+        <div className="flex flex-wrap gap-2 justify-center pt-1">
+          <a
+            href={dataUrl}
+            download={fileName}
+            className="bg-primary-600 hover:bg-primary-700 text-white text-xs font-bold px-3 py-2 rounded-lg transition flex items-center space-x-1.5"
+          >
+            <Download className="w-4 h-4" />
+            <span>Save / Download QR</span>
+          </a>
+          <button
+            type="button"
+            onClick={handlePrint}
+            className="bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold px-3 py-2 rounded-lg transition flex items-center space-x-1.5"
+          >
+            <Printer className="w-4 h-4" />
+            <span>Print / Share</span>
+          </button>
+        </div>
+      )}
+
+      <span className="text-[10px] text-slate-400 text-center leading-normal">
+        Encodes an opaque one-off token only — it carries none of your personal details.
+      </span>
+    </div>
+  );
+}
+
+/**
+ * Full registration confirmation. Shows far more than "registration
+ * successful": what was booked, who for, the entry pass, and what to do next.
+ */
+function RegistrationConfirmation({
+  registration,
+  event,
+  showQr,
+  supportEmail
+}: {
+  registration: RegistrationResult;
+  event: RegistrationEventDetails;
+  /** QR entry only applies to events that actually scan people in. */
+  showQr: boolean;
+  supportEmail?: string | null;
+}) {
+  const when = formatEventWhen(event);
+  const isOnline = event.format === 'online';
+
+  return (
+    <div className="space-y-4">
+      <div className="bg-green-50 border border-green-200 rounded-xl p-5 text-center space-y-2">
+        <CheckCircle className="w-12 h-12 text-green-500 mx-auto" />
+        <h3 className="font-bold text-green-800 text-lg">Registration Confirmed</h3>
+        <p className="text-xs text-green-700">
+          You're on the list for <strong>{event.name}</strong>. A confirmation email is on its way
+          to you.
+        </p>
+      </div>
+
+      <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-3">
+        <div className="space-y-1">
+          <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+            Registration ID
+          </span>
+          <p className="font-mono bg-slate-50 border px-3 py-2 rounded font-bold text-slate-800 text-sm">
+            {registration.registrationId}
+          </p>
+        </div>
+
+        <dl className="space-y-2 text-xs">
+          <div className="flex items-start space-x-2">
+            <UserCheck className="w-4 h-4 text-slate-400 flex-shrink-0 mt-0.5" />
+            <div>
+              <dt className="text-slate-500">Participant</dt>
+              <dd className="font-semibold text-slate-800">{registration.full_name || '—'}</dd>
+            </div>
+          </div>
+          <div className="flex items-start space-x-2">
+            <Calendar className="w-4 h-4 text-slate-400 flex-shrink-0 mt-0.5" />
+            <div>
+              <dt className="text-slate-500">Event</dt>
+              <dd className="font-semibold text-slate-800">{event.name}</dd>
+            </div>
+          </div>
+          {when && (
+            <div className="flex items-start space-x-2">
+              <Clock className="w-4 h-4 text-slate-400 flex-shrink-0 mt-0.5" />
+              <div>
+                <dt className="text-slate-500">Date &amp; time</dt>
+                <dd className="font-semibold text-slate-800">{when}</dd>
+              </div>
+            </div>
+          )}
+          {event.venue && (
+            <div className="flex items-start space-x-2">
+              <MapPin className="w-4 h-4 text-slate-400 flex-shrink-0 mt-0.5" />
+              <div>
+                <dt className="text-slate-500">Venue</dt>
+                <dd className="font-semibold text-slate-800">{event.venue}</dd>
+              </div>
+            </div>
+          )}
+          {isOnline && event.meeting_link && (
+            <div className="flex items-start space-x-2">
+              <ChevronRight className="w-4 h-4 text-slate-400 flex-shrink-0 mt-0.5" />
+              <div>
+                <dt className="text-slate-500">Joining link</dt>
+                <dd>
+                  <a
+                    href={event.meeting_link}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="font-semibold text-primary-600 break-all"
+                  >
+                    {event.meeting_link}
+                  </a>
+                </dd>
+              </div>
+            </div>
+          )}
+        </dl>
+      </div>
+
+      {showQr && <EntryPassQR registration={registration} eventName={event.name} />}
+
+      {showQr && (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 space-y-2">
+          <div className="flex items-center space-x-2">
+            <ShieldCheck className="w-4 h-4 text-amber-700 flex-shrink-0" />
+            <h4 className="font-bold text-amber-900 text-xs uppercase tracking-wider">
+              Keep your pass safe
+            </h4>
+          </div>
+          <ul className="text-[11px] text-amber-900 space-y-1 list-disc pl-4 leading-relaxed">
+            <li>Download or screenshot the QR so you can show it offline at the venue.</li>
+            <li>Show the QR at the entry scanner when you arrive.</li>
+            <li>Treat it like a ticket — never share or post it publicly.</li>
+            <li>Bring it with you to the event, on your phone or printed.</li>
+            <li>Carry a photo ID in case the organisers verify identity at entry.</li>
+          </ul>
+        </div>
+      )}
+
+      <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-1.5">
+        <div className="flex items-center space-x-2">
+          <LifeBuoy className="w-4 h-4 text-slate-500 flex-shrink-0" />
+          <h4 className="font-bold text-slate-700 text-xs uppercase tracking-wider">
+            Lost your QR?
+          </h4>
+        </div>
+        <p className="text-[11px] text-slate-600 leading-relaxed">
+          Re-open the link in your confirmation email to view the pass again. If you cannot find the
+          email, quote registration ID{' '}
+          <span className="font-mono font-bold">{registration.registrationId}</span> to the event
+          desk and they can look you up and re-issue your pass.
+        </p>
+        {supportEmail && (
+          <p className="text-[11px] text-slate-600">
+            Need help? Contact{' '}
+            <a href={`mailto:${supportEmail}`} className="font-semibold text-primary-600">
+              {supportEmail}
+            </a>
+            .
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Standalone pass page (/pass/:token) — the target of the "View my entry pass"
+ * link in the confirmation email, and how a participant gets their QR back on
+ * another device.
+ */
+function EntryPassPage() {
+  const { token } = useParams<{ token: string }>();
+  const [data, setData] = useState<RegistrationResult | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!token) return;
+    apiRequest<RegistrationResult>(`/registrations/pass/${token}`)
+      .then((d) => {
+        setData(d);
+        setError(null);
+      })
+      .catch((err: any) => setError(err.message || 'This pass link is not valid.'))
+      .finally(() => setLoading(false));
+  }, [token]);
+
+  if (loading) {
+    return (
+      <div className="max-w-md mx-auto px-4 py-20 text-center">
+        <RefreshCw className="w-8 h-8 text-primary-600 animate-spin mx-auto mb-3" />
+        <p className="text-sm text-slate-500">Loading your entry pass…</p>
+      </div>
+    );
+  }
+
+  if (error || !data?.event) {
+    return (
+      <div className="max-w-md mx-auto px-4 py-20 text-center space-y-3">
+        <AlertTriangle className="w-10 h-10 text-red-500 mx-auto" />
+        <h2 className="text-lg font-bold text-slate-800">Pass unavailable</h2>
+        <p className="text-sm text-slate-600">{error || 'This pass link is not valid.'}</p>
+        <Link to="/" className="text-xs font-semibold text-primary-600">
+          Back to home &rarr;
+        </Link>
+      </div>
+    );
+  }
+
+  return (
+    <div className="max-w-md mx-auto px-4 py-10">
+      <RegistrationConfirmation registration={data} event={data.event} showQr={true} />
+    </div>
+  );
+}
+
+// ==========================================
 // PAGE: PUBLIC EVENT VIEW & BUILT-IN REGISTER
 // ==========================================
 function EventPage() {
@@ -993,7 +1363,7 @@ function EventPage() {
   const [regCourse, setRegCourse] = useState('');
   const [regYear, setRegYear] = useState('');
   const [regDesignation, setRegDesignation] = useState('Student');
-  const [regSuccess, setRegSuccess] = useState<{ id: string; registrationId: string } | null>(null);
+  const [regSuccess, setRegSuccess] = useState<RegistrationResult | null>(null);
   const [regError, setRegError] = useState<string | null>(null);
   const [regLoading, setRegLoading] = useState(false);
 
@@ -1048,7 +1418,9 @@ function EventPage() {
 
       setRegSuccess({
         id: data.id,
-        registrationId: data.registrationId
+        registrationId: data.registrationId,
+        full_name: data.full_name,
+        event: data.event
       });
 
       // Clear form
@@ -1248,23 +1620,25 @@ function EventPage() {
                   )}
 
                   {regSuccess ? (
-                    <div className="bg-green-50 border border-green-200 rounded-lg p-6 text-center space-y-4">
-                      <CheckCircle className="w-12 h-12 text-green-500 mx-auto" />
-                      <h3 className="font-bold text-green-800 text-lg">Registration Success!</h3>
-                      <div className="space-y-2 text-slate-700 text-xs">
-                        <p>Welcome! Your entry code has been reserved.</p>
-                        <p className="font-mono bg-white border px-3 py-2 rounded font-bold text-slate-800 text-sm">
-                          ID: {regSuccess.registrationId}
-                        </p>
-                      </div>
-                      <div className="bg-white border rounded p-4 flex flex-col items-center space-y-2">
-                        <span className="text-[10px] text-slate-400 font-bold uppercase">Your Secure Entrance QR Pass</span>
-                        <div className="w-32 h-32 bg-slate-100 flex items-center justify-center font-mono text-[9px] text-slate-400 p-2 text-center rounded border border-dashed">
-                          QR OPAQUE PASS<br/>[Token Encrypted]<br/>{regSuccess.id.substring(0,8)}...
-                        </div>
-                        <span className="text-[9px] text-slate-400 text-center leading-normal">Contains opaque identifier token only. Contains absolute zero PII.</span>
-                      </div>
-                    </div>
+                    <RegistrationConfirmation
+                      registration={regSuccess}
+                      event={
+                        regSuccess.event || {
+                          id: event.id,
+                          name: event.name,
+                          start_date: event.start_date,
+                          end_date: event.end_date,
+                          start_time: event.start_time,
+                          end_time: event.end_time,
+                          venue: event.venue,
+                          format: event.format,
+                          meeting_link: event.meeting_link
+                        }
+                      }
+                      // Physical/hybrid events scan people in at the door, so
+                      // the QR pass is what they need on arrival.
+                      showQr={event.format !== 'online'}
+                    />
                   ) : (
                     <form onSubmit={handleRegisterSubmit} className="space-y-4">
                       <div className="space-y-1">
@@ -1658,15 +2032,23 @@ function CoordinatorVolunteers({ currentUser }: { currentUser: User }) {
   const [events, setEvents] = useState<Event[]>([]);
   const [eventId, setEventId] = useState('');
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    apiRequest<Event[]>('/events')
+    // /events is paginated and returns { events, total, page, ... } — not a
+    // bare array. Typing it as Event[] made `list.length` undefined, so this
+    // dropdown was permanently empty.
+    apiRequest<EventListResponse>('/events')
       .then((d) => {
-        const list = d || [];
+        const list = d?.events || [];
         setEvents(list);
+        setError(null);
         if (list.length > 0) setEventId((prev) => prev || list[0].id);
       })
-      .catch(() => setEvents([]))
+      .catch((err: any) => {
+        setEvents([]);
+        setError(err.message || 'Failed to load your events.');
+      })
       .finally(() => setLoading(false));
   }, []);
 
@@ -1693,6 +2075,11 @@ function CoordinatorVolunteers({ currentUser }: { currentUser: User }) {
         <label className="block text-xs font-bold uppercase tracking-wider text-slate-500">Event</label>
         {loading ? (
           <p className="text-sm text-slate-500">Loading your events…</p>
+        ) : error ? (
+          <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-red-700 text-sm flex items-center space-x-2">
+            <AlertTriangle className="w-5 h-5 flex-shrink-0" />
+            <span className="font-medium">{error}</span>
+          </div>
         ) : events.length === 0 ? (
           <p className="text-sm text-slate-500">You are not assigned to any events yet.</p>
         ) : (
@@ -1718,16 +2105,38 @@ function CoordinatorVolunteers({ currentUser }: { currentUser: User }) {
 function DashboardOverview({ currentUser }: { currentUser: User }) {
   const [events, setEvents] = useState<Event[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const location = useLocation();
 
   useEffect(() => {
-    // List events that are visible or managed by this user
-    apiRequest<{ events: Event[] }>('/events')
+    // The server is the single source of truth for events — this list is
+    // always re-fetched, never restored from local/React state. Re-running on
+    // the authenticated user id covers "refetch after authentication", and on
+    // location.key covers returning here after creating an event.
+    let cancelled = false;
+    setLoading(true);
+
+    apiRequest<EventListResponse>('/events')
       .then((data) => {
-        setEvents(data.events || []);
+        if (cancelled) return;
+        setEvents(data?.events || []);
+        setError(null);
       })
-      .catch(() => {})
-      .finally(() => setLoading(false));
-  }, []);
+      .catch((err: any) => {
+        if (cancelled) return;
+        // Never hide a failure behind an empty list: an empty "Manage Events"
+        // screen is indistinguishable from "my events disappeared".
+        setEvents([]);
+        setError(err.message || 'Failed to load your events.');
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUser.id, location.key]);
 
   return (
     <div className="space-y-8">
@@ -1773,6 +2182,15 @@ function DashboardOverview({ currentUser }: { currentUser: User }) {
             <div className="py-12 text-center">
               <RefreshCw className="w-8 h-8 text-primary-600 animate-spin mx-auto mb-2" />
               <p className="text-xs text-slate-500">Loading events directory...</p>
+            </div>
+          ) : error ? (
+            <div className="bg-red-50 border border-red-200 rounded-2xl p-8 text-center max-w-lg mx-auto space-y-3">
+              <AlertTriangle className="w-10 h-10 text-red-500 mx-auto" />
+              <h3 className="font-bold text-red-800 text-lg">Could not load your events</h3>
+              <p className="text-red-700 text-sm">{error}</p>
+              <p className="text-red-600 text-xs">
+                Your events have not been deleted — the server could not be reached. Please retry.
+              </p>
             </div>
           ) : events.length === 0 ? (
             <div className="bg-white border border-dashed border-slate-300 rounded-2xl p-12 text-center max-w-lg mx-auto">

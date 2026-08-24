@@ -7,6 +7,7 @@ import { formatCSV } from '../utils/csv';
 import { checkEventAuthority } from './events';
 import { HonoTypes, User } from '../types';
 import { generateShortId, generateOpaqueToken } from '../utils/crypto';
+import { sendRegistrationConfirmationEmail } from '../utils/registrationEmail';
 
 const registrations = new Hono<HonoTypes>();
 
@@ -30,7 +31,11 @@ registrations.post('/events/:id/register', rateLimit('registration', limits.regi
 
   // Fetch event details
   const event = await db
-    .prepare("SELECT id, short_name, status, registration_type FROM events WHERE id = ?")
+    .prepare(
+      `SELECT id, name, short_name, status, registration_type, start_date, end_date,
+              start_time, end_time, venue, format, meeting_link
+       FROM events WHERE id = ?`
+    )
     .bind(eventId)
     .first<any>();
 
@@ -170,6 +175,26 @@ registrations.post('/events/:id/register', rateLimit('registration', limits.regi
     c.req.header('CF-Connecting-IP')
   );
 
+  // Confirmation email is best-effort and MUST NOT affect the HTTP result:
+  // the registration is already committed, so a mail outage must never be
+  // reported to the participant as a failed registration. Failures are logged
+  // to email_logs for operators to retry.
+  c.executionCtx?.waitUntil?.(
+    sendRegistrationConfirmationEmail(c.env, {
+      eventId,
+      eventName: event.name,
+      registrationId,
+      fullName: full_name,
+      email: email.toLowerCase(),
+      qrToken,
+      startDate: event.start_date,
+      startTime: event.start_time,
+      endTime: event.end_time,
+      venue: event.venue,
+      format: event.format
+    })
+  );
+
   return c.json({
     success: true,
     data: {
@@ -178,7 +203,76 @@ registrations.post('/events/:id/register', rateLimit('registration', limits.regi
       full_name,
       email: email.toLowerCase(),
       phone,
-      college
+      college,
+      // Event details for the confirmation screen, so it can show what/when/
+      // where without a second round trip.
+      event: {
+        id: event.id,
+        name: event.name,
+        short_name: event.short_name,
+        start_date: event.start_date,
+        end_date: event.end_date,
+        start_time: event.start_time,
+        end_time: event.end_time,
+        venue: event.venue,
+        format: event.format,
+        meeting_link: event.format === 'offline' ? null : event.meeting_link
+      }
+    }
+  });
+});
+
+// 1b. PUBLIC: Retrieve a pass by its opaque token.
+//
+// The token is the credential: it is a 32-byte server-generated random value
+// (never a participant id, email or any other client-controlled value), so it
+// cannot be guessed or enumerated, and knowing a participant's name or
+// registration id does not let anyone fetch their pass. Rate limited to blunt
+// brute-force attempts. Returns only what the pass screen needs to render —
+// never phone, college, course or custom answers.
+registrations.get('/pass/:token', rateLimit('verification', limits.verification), async (c) => {
+  const db = c.env.DB;
+  const token = c.req.param('token') || '';
+
+  if (!token || token.length < 16) {
+    throw new AppError('Invalid pass link', 'INVALID_PASS', 404);
+  }
+
+  const reg = await db
+    .prepare(
+      `SELECT r.registration_id, r.full_name, r.qr_token,
+              e.id AS event_id, e.name AS event_name, e.short_name,
+              e.start_date, e.end_date, e.start_time, e.end_time,
+              e.venue, e.format, e.meeting_link
+       FROM event_registrations r
+       JOIN events e ON e.id = r.event_id
+       WHERE r.qr_token = ?`
+    )
+    .bind(token)
+    .first<any>();
+
+  if (!reg) {
+    throw new AppError('This pass link is not valid or has been revoked.', 'INVALID_PASS', 404);
+  }
+
+  return c.json({
+    success: true,
+    data: {
+      id: reg.qr_token,
+      registrationId: reg.registration_id,
+      full_name: reg.full_name,
+      event: {
+        id: reg.event_id,
+        name: reg.event_name,
+        short_name: reg.short_name,
+        start_date: reg.start_date,
+        end_date: reg.end_date,
+        start_time: reg.start_time,
+        end_time: reg.end_time,
+        venue: reg.venue,
+        format: reg.format,
+        meeting_link: reg.format === 'offline' ? null : reg.meeting_link
+      }
     }
   });
 });

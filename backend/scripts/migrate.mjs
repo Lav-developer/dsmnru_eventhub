@@ -1,9 +1,15 @@
 #!/usr/bin/env node
 // Safe D1 migration runner for DSMNRU EventHub.
 //
-// Wraps `wrangler d1 migrations apply` and reconciles 0003_add_password_set.sql
+// Wraps `wrangler d1 migrations apply` and reconciles additive schema drift
 // before it runs, because SQLite/D1 has no "ALTER TABLE ... ADD COLUMN IF NOT
-// EXISTS" and 0001_schema.sql already creates the column on fresh databases.
+// EXISTS": a migration that ALTERs a column an existing database already has
+// fails with "duplicate column name", and wrangler aborts the entire migration
+// chain on the first failure, silently skipping every later migration.
+//
+// Drift columns are declared in RECONCILED_COLUMNS (migrate-plan.mjs) and added
+// here only when genuinely missing. Migration files themselves stay free of
+// unguardable DDL so that a plain `wrangler d1 migrations apply` also succeeds.
 //
 // Usage:
 //   npm run db:migrate            # local database
@@ -16,10 +22,13 @@ import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { planPasswordSetReconcile, describePlan, PASSWORD_SET_MIGRATION } from './migrate-plan.mjs';
+import {
+  planColumnReconcile,
+  describeColumnPlan,
+  RECONCILED_COLUMNS
+} from './migrate-plan.mjs';
 
 const DB_NAME = 'dsmnru-eventhub-db';
-const MIGRATIONS_TABLE = 'd1_migrations';
 
 // Resolve the backend project root from this file, so the runner works no
 // matter which directory it is invoked from.
@@ -114,53 +123,53 @@ function columnExists(table, column) {
   return Number(rows[0]?.c ?? 0) > 0;
 }
 
-function migrationRecorded(name) {
-  if (!tableExists(MIGRATIONS_TABLE)) return false;
-  const rows = query(`SELECT COUNT(*) AS c FROM ${MIGRATIONS_TABLE} WHERE name='${name}'`);
-  return Number(rows[0]?.c ?? 0) > 0;
-}
+// Columns that must exist on users once every migration has run. Verified as a
+// post-condition so a silently skipped migration can never be reported as
+// success again.
+const REQUIRED_USER_COLUMNS = ['password_set', 'force_password_change'];
 
 function main() {
   console.log(`\n▶ Reconciling schema drift for ${DB_NAME} (${isRemote ? 'remote' : 'local'})…`);
 
-  const state = {
-    usersTableExists: tableExists('users'),
-    passwordSetColumnExists: columnExists('users', 'password_set'),
-    alreadyRecorded: migrationRecorded(PASSWORD_SET_MIGRATION)
-  };
-
-  const plan = planPasswordSetReconcile(state);
-  console.log(`  ${describePlan(plan, state)}`);
-
-  if (plan === 'mark-applied') {
-    // Ensure the migrations table exists before inserting into it. Wrangler
-    // creates it with this exact shape.
-    query(
-      `CREATE TABLE IF NOT EXISTS ${MIGRATIONS_TABLE}(
-         id INTEGER PRIMARY KEY AUTOINCREMENT,
-         name TEXT UNIQUE,
-         applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
-       )`
-    );
-    query(`INSERT OR IGNORE INTO ${MIGRATIONS_TABLE} (name) VALUES ('${PASSWORD_SET_MIGRATION}')`);
+  for (const target of RECONCILED_COLUMNS) {
+    const plan = planColumnReconcile({
+      tableExists: tableExists(target.table),
+      columnExists: columnExists(target.table, target.column)
+    });
+    console.log(`  ${describeColumnPlan(plan, target)}`);
+    if (plan === 'add-column') {
+      console.log(`    reason: ${target.reason}`);
+      query(target.ddl);
+    }
   }
 
   console.log('\n▶ Applying migrations…');
   const apply = wrangler(['d1', 'migrations', 'apply', DB_NAME, ...targetFlags, ...passthrough]);
   if (apply.status !== 0) process.exit(apply.status ?? 1);
 
-  // Post-condition: the column MUST exist once migrations report success.
-  const finalHasColumn = columnExists('users', 'password_set');
-  console.log('\n▶ Verifying users.password_set …');
-  if (!finalHasColumn) {
-    console.error('❌ users.password_set is STILL missing after migrations. Aborting.');
+  // Post-condition: every column the application queries MUST exist once
+  // migrations report success. `wrangler d1 migrations apply` exits 0 even when
+  // it skipped migrations after a failure, so this check is what turns a
+  // partially applied chain into a hard error instead of a runtime D1_ERROR.
+  console.log('\n▶ Verifying users schema …');
+  const info = query(`PRAGMA table_info(users)`);
+  const present = new Set(info.map((r) => r.name));
+  const missing = REQUIRED_USER_COLUMNS.filter((name) => !present.has(name));
+
+  if (missing.length > 0) {
+    console.error(
+      `❌ users is STILL missing after migrations: ${missing.join(', ')}. Aborting.\n` +
+        '   The migration chain did not fully apply — check the table above for a ❌ row.'
+    );
     process.exit(1);
   }
-  const info = query(`PRAGMA table_info(users)`);
-  const col = info.find((r) => r.name === 'password_set');
-  console.log(
-    `✅ users.password_set present (type=${col.type}, notnull=${col.notnull}, default=${col.dflt_value}).`
-  );
+
+  for (const name of REQUIRED_USER_COLUMNS) {
+    const col = info.find((r) => r.name === name);
+    console.log(
+      `✅ users.${name} present (type=${col.type}, notnull=${col.notnull}, default=${col.dflt_value}).`
+    );
+  }
 }
 
 main();
