@@ -41,6 +41,10 @@ export async function apiRequest<T = any>(
     const error = new Error(errMsg) as any;
     error.code = errCode;
     error.requestId = json.error?.requestId;
+    // Some endpoints attach extra context to the error payload (for example the
+    // attendance scanner returns the participant on an "already checked in"
+    // conflict). Keep it reachable instead of discarding it.
+    error.details = json.error;
     throw error;
   }
 

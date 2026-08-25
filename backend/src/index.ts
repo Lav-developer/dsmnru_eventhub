@@ -107,6 +107,33 @@ app.use('*', async (c, next) => {
 // 4. Session Authentication Middleware (loads and binds c.get('user') and c.get('session'))
 app.use('*', authenticate);
 
+// 4.5. Global forced-password-change gate.
+//
+// While an account still uses its provisioned email-as-password
+// (force_password_change = 1) it may only reach the change-password flow
+// itself, plus /auth/me and /auth/logout. Everything else — including routes
+// that read c.get('user') directly instead of going through requireAuth() — is
+// blocked here, so the gate cannot be bypassed by calling an API directly.
+const PASSWORD_CHANGE_ALLOWED_PATHS = new Set([
+  '/api/v1/auth/change-password',
+  '/api/v1/auth/me',
+  '/api/v1/auth/logout',
+  '/api/v1/auth/login',
+  '/api/v1/auth/setup-password'
+]);
+
+app.use('*', async (c, next) => {
+  const user = c.get('user');
+  if (user?.force_password_change && !PASSWORD_CHANGE_ALLOWED_PATHS.has(c.req.path)) {
+    throw new AppError(
+      'You must change your password before continuing.',
+      'PASSWORD_CHANGE_REQUIRED',
+      403
+    );
+  }
+  await next();
+});
+
 // 5. CSRF Origin Protection Middleware for State-Changing Authenticated Requests
 app.use('*', async (c, next) => {
   const method = c.req.method;

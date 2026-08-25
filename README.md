@@ -52,7 +52,7 @@ cd backend
 npm install
 
 # Run database schema migrations locally
-npx wrangler d1 migrations apply dsmnru-eventhub-db --local
+npm run db:migrate
 
 # Generate TypeScript types from wrangler environment
 npm run cf-typegen

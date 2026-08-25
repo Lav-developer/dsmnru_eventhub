@@ -6,7 +6,8 @@ import {
   Link,
   useParams,
   useNavigate,
-  useSearchParams
+  useSearchParams,
+  useLocation
 } from 'react-router-dom';
 import {
   Calendar,
@@ -39,8 +40,14 @@ import {
   
   Briefcase,
   ChevronRight,
-  UserPlus
+  UserPlus,
+  Printer,
+  MapPin,
+  Clock,
+  ShieldCheck,
+  LifeBuoy
 } from 'lucide-react';
+import QRCode from 'qrcode';
 import { apiRequest } from './utils/api';
 import { jsPDF } from 'jspdf';
 import JSZip from 'jszip';
@@ -57,6 +64,9 @@ interface User {
   status: 'pending' | 'active' | 'suspended';
   phone?: string;
   created_at: string;
+  /** Server-side truth: account still uses its provisioned email-as-password. */
+  force_password_change?: boolean;
+  password_set?: boolean;
 }
 
 interface Department {
@@ -90,6 +100,20 @@ interface Event {
   status: 'DRAFT' | 'PUBLISHED' | 'REGISTRATION_OPEN' | 'REGISTRATION_CLOSED' | 'ONGOING' | 'COMPLETED' | 'ARCHIVED';
   google_drive_folder_url?: string;
   created_at: string;
+}
+
+/**
+ * Shape returned by GET /events. It is paginated — never a bare Event[].
+ * Declared once so no call site can silently mistype it again.
+ */
+interface EventListResponse {
+  events: Event[];
+  pagination: {
+    page: number;
+    limit: number;
+    total: number;
+    totalPages: number;
+  };
 }
 
 interface Participant {
@@ -249,9 +273,24 @@ export default function App() {
             <Route path="/" element={<Home />} />
             <Route path="/login" element={<Login setCurrentUser={setCurrentUser} />} />
             <Route path="/setup-password" element={<SetupPassword />} />
+            <Route path="/change-password" element={<ChangePassword currentUser={currentUser} setCurrentUser={setCurrentUser} />} />
             <Route path="/events/:slug" element={<EventPage />} />
+            <Route path="/pass/:token" element={<EntryPassPage />} />
             <Route path="/verify/:certificateId" element={<CertificateVerifyPage />} />
-            <Route path="/dashboard/*" element={currentUser ? <Dashboard currentUser={currentUser} /> : <Link to="/login" />} />
+            <Route
+              path="/dashboard/*"
+              element={
+                !currentUser ? (
+                  <Link to="/login" />
+                ) : currentUser.force_password_change ? (
+                  // Server also rejects every dashboard API with
+                  // PASSWORD_CHANGE_REQUIRED; this just routes the user there.
+                  <ForcedPasswordChangeRedirect />
+                ) : (
+                  <Dashboard currentUser={currentUser} />
+                )
+              }
+            />
           </Routes>
         </main>
 
@@ -539,13 +578,22 @@ function Login({ setCurrentUser }: { setCurrentUser: (user: User | null) => void
     setError(null);
 
     try {
-      const data = await apiRequest<{ token: string; user: User }>('/auth/login', {
-        method: 'POST',
-        body: JSON.stringify({ email, password })
-      });
-      
+      const data = await apiRequest<{ token: string; user: User; force_password_change?: boolean }>(
+        '/auth/login',
+        {
+          method: 'POST',
+          body: JSON.stringify({ email, password })
+        }
+      );
+
       setCurrentUser(data.user);
-      navigate('/dashboard');
+      // Server-side truth decides. Every dashboard API is blocked with
+      // PASSWORD_CHANGE_REQUIRED until the password is changed.
+      if (data.force_password_change || data.user?.force_password_change) {
+        navigate('/change-password', { replace: true });
+      } else {
+        navigate('/dashboard');
+      }
     } catch (err: any) {
       setError(err.message || 'Login failed. Please verify credentials.');
     } finally {
@@ -609,6 +657,162 @@ function Login({ setCurrentUser }: { setCurrentUser: (user: User | null) => void
         </form>
 
         <p className="text-center text-xs text-slate-400">Staff accounts are provisioned by the role hierarchy. Participants register on event pages only.</p>
+      </div>
+    </div>
+  );
+}
+
+// ==========================================
+// PAGE: FORCED / VOLUNTARY PASSWORD CHANGE
+// ==========================================
+function ForcedPasswordChangeRedirect() {
+  const navigate = useNavigate();
+  useEffect(() => {
+    navigate('/change-password', { replace: true });
+  }, [navigate]);
+  return (
+    <div className="py-16 text-center">
+      <RefreshCw className="w-8 h-8 text-primary-600 animate-spin mx-auto mb-3" />
+      <p className="text-sm text-slate-600 font-medium">Password change required — redirecting…</p>
+    </div>
+  );
+}
+
+function ChangePassword({
+  currentUser,
+  setCurrentUser
+}: {
+  currentUser: User | null;
+  setCurrentUser: (user: User | null) => void;
+}) {
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const navigate = useNavigate();
+
+  const forced = !!currentUser?.force_password_change;
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+
+    if (newPassword !== confirmPassword) {
+      setError('New password and confirmation do not match.');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      await apiRequest('/auth/change-password', {
+        method: 'POST',
+        body: JSON.stringify({ current_password: currentPassword, new_password: newPassword })
+      });
+
+      // Server rotated the session; re-read authoritative state.
+      const me = await apiRequest<any>('/auth/me');
+      setCurrentUser(me?.user || null);
+      navigate('/dashboard', { replace: true });
+    } catch (err: any) {
+      setError(err.message || 'Password change failed.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (!currentUser) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center px-4">
+        <div className="max-w-md w-full bg-white border border-slate-200 rounded-2xl shadow-sm p-8 text-center space-y-4">
+          <h2 className="text-xl font-extrabold text-slate-800">Sign in required</h2>
+          <p className="text-sm text-slate-500">Log in first to change your password.</p>
+          <Link to="/login" className="inline-block bg-primary-600 text-white px-4 py-2 rounded-lg text-sm font-bold">
+            Go to login
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-slate-50 flex items-center justify-center py-12 px-4">
+      <div className="max-w-md w-full bg-white border border-slate-200 rounded-2xl shadow-sm p-8 space-y-6">
+        <div className="text-center space-y-2">
+          <span className="text-4xl block">🔐</span>
+          <h2 className="text-2xl font-extrabold text-slate-800">
+            {forced ? 'Set a new password' : 'Change password'}
+          </h2>
+          {forced && (
+            <p className="text-sm text-slate-500">
+              Your account currently uses your email address as its password. Choose a new password to
+              continue — the initial password stops working immediately.
+            </p>
+          )}
+        </div>
+
+        {forced && (
+          <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-amber-800 text-xs flex items-start space-x-2">
+            <ShieldAlert className="w-4 h-4 flex-shrink-0 mt-0.5" />
+            <span className="font-medium">
+              Dashboard access is locked until you set a new password.
+            </span>
+          </div>
+        )}
+
+        {error && (
+          <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-red-700 text-sm flex items-center space-x-2">
+            <AlertTriangle className="w-5 h-5 flex-shrink-0" />
+            <span className="font-medium">{error}</span>
+          </div>
+        )}
+
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div className="space-y-1">
+            <label className="block text-xs font-bold uppercase tracking-wider text-slate-500">
+              {forced ? 'Current password (your email address)' : 'Current password'}
+            </label>
+            <input
+              type="password"
+              required
+              value={currentPassword}
+              onChange={(e) => setCurrentPassword(e.target.value)}
+              placeholder={forced ? currentUser.email : '••••••••'}
+              className="w-full px-4 py-2.5 rounded-lg border border-slate-300 text-sm"
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="block text-xs font-bold uppercase tracking-wider text-slate-500">New password</label>
+            <input
+              type="password"
+              required
+              minLength={8}
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+              placeholder="At least 8 characters"
+              className="w-full px-4 py-2.5 rounded-lg border border-slate-300 text-sm"
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="block text-xs font-bold uppercase tracking-wider text-slate-500">Confirm new password</label>
+            <input
+              type="password"
+              required
+              minLength={8}
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+              placeholder="Repeat new password"
+              className="w-full px-4 py-2.5 rounded-lg border border-slate-300 text-sm"
+            />
+          </div>
+          <button
+            type="submit"
+            disabled={loading}
+            className="w-full bg-primary-600 hover:bg-primary-700 text-white py-3 rounded-lg font-bold text-sm flex items-center justify-center space-x-2"
+          >
+            {loading ? <RefreshCw className="w-5 h-5 animate-spin" /> : <span>Save new password</span>}
+          </button>
+        </form>
       </div>
     </div>
   );
@@ -791,6 +995,354 @@ function Register() {
 }
 
 // ==========================================
+// REGISTRATION CONFIRMATION + ENTRY PASS (QR)
+// ==========================================
+
+interface RegistrationEventDetails {
+  id: string;
+  name: string;
+  short_name?: string;
+  start_date?: string;
+  end_date?: string;
+  start_time?: string;
+  end_time?: string;
+  venue?: string;
+  format?: string;
+  meeting_link?: string | null;
+}
+
+interface RegistrationResult {
+  /** Opaque, server-generated pass token. Never a participant id. */
+  id: string;
+  registrationId: string;
+  full_name?: string;
+  event?: RegistrationEventDetails;
+}
+
+function formatEventWhen(evt?: RegistrationEventDetails): string | null {
+  if (!evt?.start_date) return null;
+  const time = [evt.start_time, evt.end_time].filter(Boolean).join(' – ');
+  const sameDay = !evt.end_date || evt.end_date === evt.start_date;
+  const dates = sameDay ? evt.start_date : `${evt.start_date} → ${evt.end_date}`;
+  return time ? `${dates}, ${time}` : dates;
+}
+
+/**
+ * Renders the participant's entry pass as a real, scannable QR code.
+ *
+ * The encoded payload is ONLY the opaque pass token issued by the server for
+ * this specific registration — no name, email, phone or any other personal
+ * data is placed inside the QR, so a photographed pass leaks nothing. The
+ * token is also not derived from any client-supplied identifier.
+ */
+function EntryPassQR({
+  registration,
+  eventName
+}: {
+  registration: RegistrationResult;
+  eventName: string;
+}) {
+  const [dataUrl, setDataUrl] = useState<string | null>(null);
+  const [qrError, setQrError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    QRCode.toDataURL(registration.id, {
+      errorCorrectionLevel: 'M',
+      margin: 2,
+      width: 512
+    })
+      .then((url) => {
+        if (!cancelled) {
+          setDataUrl(url);
+          setQrError(null);
+        }
+      })
+      .catch((err: any) => {
+        if (!cancelled) setQrError(err?.message || 'Could not render your QR code.');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [registration.id]);
+
+  const fileName = `entry-pass-${registration.registrationId}.png`;
+
+  const handlePrint = () => {
+    if (!dataUrl) return;
+    const win = window.open('', '_blank', 'width=640,height=800');
+    if (!win) {
+      alert('Please allow pop-ups to print your pass, or download it instead.');
+      return;
+    }
+    const esc = (s: string) => s.replace(/[<>&]/g, (ch) => `&#${ch.charCodeAt(0)};`);
+    win.document.write(`<!doctype html><html><head><title>Entry Pass ${esc(
+      registration.registrationId
+    )}</title></head>
+      <body style="font-family:system-ui,sans-serif;text-align:center;padding:32px;">
+        <h2 style="margin:0 0 4px;">${esc(eventName)}</h2>
+        <p style="margin:0 0 2px;font-size:14px;">${esc(registration.full_name || '')}</p>
+        <p style="margin:0 0 16px;font-family:monospace;font-size:14px;">${esc(
+          registration.registrationId
+        )}</p>
+        <img src="${dataUrl}" alt="Entry pass QR code" style="width:280px;height:280px;" />
+        <p style="margin-top:16px;font-size:12px;color:#555;">
+          Show this QR at the entry scanner. Do not share it with anyone.
+        </p>
+        <script>window.onload = function(){ window.focus(); window.print(); };<\/script>
+      </body></html>`);
+    win.document.close();
+  };
+
+  return (
+    <div className="bg-white border border-slate-200 rounded-xl p-5 flex flex-col items-center space-y-3">
+      <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">
+        Your Secure Entry QR Pass
+      </span>
+
+      {qrError ? (
+        <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-red-700 text-xs text-center space-y-1">
+          <AlertTriangle className="w-5 h-5 mx-auto" />
+          <p className="font-semibold">{qrError}</p>
+          <p>
+            Your registration is safe. Quote{' '}
+            <span className="font-mono font-bold">{registration.registrationId}</span> at the help
+            desk to have your pass re-issued.
+          </p>
+        </div>
+      ) : dataUrl ? (
+        <img
+          src={dataUrl}
+          alt={`Entry pass QR code for registration ${registration.registrationId}`}
+          className="w-44 h-44 rounded border border-slate-200"
+        />
+      ) : (
+        <div className="w-44 h-44 flex items-center justify-center rounded border border-dashed border-slate-300">
+          <RefreshCw className="w-6 h-6 text-slate-400 animate-spin" />
+        </div>
+      )}
+
+      {dataUrl && !qrError && (
+        <div className="flex flex-wrap gap-2 justify-center pt-1">
+          <a
+            href={dataUrl}
+            download={fileName}
+            className="bg-primary-600 hover:bg-primary-700 text-white text-xs font-bold px-3 py-2 rounded-lg transition flex items-center space-x-1.5"
+          >
+            <Download className="w-4 h-4" />
+            <span>Save / Download QR</span>
+          </a>
+          <button
+            type="button"
+            onClick={handlePrint}
+            className="bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold px-3 py-2 rounded-lg transition flex items-center space-x-1.5"
+          >
+            <Printer className="w-4 h-4" />
+            <span>Print / Share</span>
+          </button>
+        </div>
+      )}
+
+      <span className="text-[10px] text-slate-400 text-center leading-normal">
+        Encodes an opaque one-off token only — it carries none of your personal details.
+      </span>
+    </div>
+  );
+}
+
+/**
+ * Full registration confirmation. Shows far more than "registration
+ * successful": what was booked, who for, the entry pass, and what to do next.
+ */
+function RegistrationConfirmation({
+  registration,
+  event,
+  showQr,
+  supportEmail
+}: {
+  registration: RegistrationResult;
+  event: RegistrationEventDetails;
+  /** QR entry only applies to events that actually scan people in. */
+  showQr: boolean;
+  supportEmail?: string | null;
+}) {
+  const when = formatEventWhen(event);
+  const isOnline = event.format === 'online';
+
+  return (
+    <div className="space-y-4">
+      <div className="bg-green-50 border border-green-200 rounded-xl p-5 text-center space-y-2">
+        <CheckCircle className="w-12 h-12 text-green-500 mx-auto" />
+        <h3 className="font-bold text-green-800 text-lg">Registration Confirmed</h3>
+        <p className="text-xs text-green-700">
+          You're on the list for <strong>{event.name}</strong>. A confirmation email is on its way
+          to you.
+        </p>
+      </div>
+
+      <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-3">
+        <div className="space-y-1">
+          <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+            Registration ID
+          </span>
+          <p className="font-mono bg-slate-50 border px-3 py-2 rounded font-bold text-slate-800 text-sm">
+            {registration.registrationId}
+          </p>
+        </div>
+
+        <dl className="space-y-2 text-xs">
+          <div className="flex items-start space-x-2">
+            <UserCheck className="w-4 h-4 text-slate-400 flex-shrink-0 mt-0.5" />
+            <div>
+              <dt className="text-slate-500">Participant</dt>
+              <dd className="font-semibold text-slate-800">{registration.full_name || '—'}</dd>
+            </div>
+          </div>
+          <div className="flex items-start space-x-2">
+            <Calendar className="w-4 h-4 text-slate-400 flex-shrink-0 mt-0.5" />
+            <div>
+              <dt className="text-slate-500">Event</dt>
+              <dd className="font-semibold text-slate-800">{event.name}</dd>
+            </div>
+          </div>
+          {when && (
+            <div className="flex items-start space-x-2">
+              <Clock className="w-4 h-4 text-slate-400 flex-shrink-0 mt-0.5" />
+              <div>
+                <dt className="text-slate-500">Date &amp; time</dt>
+                <dd className="font-semibold text-slate-800">{when}</dd>
+              </div>
+            </div>
+          )}
+          {event.venue && (
+            <div className="flex items-start space-x-2">
+              <MapPin className="w-4 h-4 text-slate-400 flex-shrink-0 mt-0.5" />
+              <div>
+                <dt className="text-slate-500">Venue</dt>
+                <dd className="font-semibold text-slate-800">{event.venue}</dd>
+              </div>
+            </div>
+          )}
+          {isOnline && event.meeting_link && (
+            <div className="flex items-start space-x-2">
+              <ChevronRight className="w-4 h-4 text-slate-400 flex-shrink-0 mt-0.5" />
+              <div>
+                <dt className="text-slate-500">Joining link</dt>
+                <dd>
+                  <a
+                    href={event.meeting_link}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="font-semibold text-primary-600 break-all"
+                  >
+                    {event.meeting_link}
+                  </a>
+                </dd>
+              </div>
+            </div>
+          )}
+        </dl>
+      </div>
+
+      {showQr && <EntryPassQR registration={registration} eventName={event.name} />}
+
+      {showQr && (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 space-y-2">
+          <div className="flex items-center space-x-2">
+            <ShieldCheck className="w-4 h-4 text-amber-700 flex-shrink-0" />
+            <h4 className="font-bold text-amber-900 text-xs uppercase tracking-wider">
+              Keep your pass safe
+            </h4>
+          </div>
+          <ul className="text-[11px] text-amber-900 space-y-1 list-disc pl-4 leading-relaxed">
+            <li>Download or screenshot the QR so you can show it offline at the venue.</li>
+            <li>Show the QR at the entry scanner when you arrive.</li>
+            <li>Treat it like a ticket — never share or post it publicly.</li>
+            <li>Bring it with you to the event, on your phone or printed.</li>
+            <li>Carry a photo ID in case the organisers verify identity at entry.</li>
+          </ul>
+        </div>
+      )}
+
+      <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-1.5">
+        <div className="flex items-center space-x-2">
+          <LifeBuoy className="w-4 h-4 text-slate-500 flex-shrink-0" />
+          <h4 className="font-bold text-slate-700 text-xs uppercase tracking-wider">
+            Lost your QR?
+          </h4>
+        </div>
+        <p className="text-[11px] text-slate-600 leading-relaxed">
+          Re-open the link in your confirmation email to view the pass again. If you cannot find the
+          email, quote registration ID{' '}
+          <span className="font-mono font-bold">{registration.registrationId}</span> to the event
+          desk and they can look you up and re-issue your pass.
+        </p>
+        {supportEmail && (
+          <p className="text-[11px] text-slate-600">
+            Need help? Contact{' '}
+            <a href={`mailto:${supportEmail}`} className="font-semibold text-primary-600">
+              {supportEmail}
+            </a>
+            .
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Standalone pass page (/pass/:token) — the target of the "View my entry pass"
+ * link in the confirmation email, and how a participant gets their QR back on
+ * another device.
+ */
+function EntryPassPage() {
+  const { token } = useParams<{ token: string }>();
+  const [data, setData] = useState<RegistrationResult | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!token) return;
+    apiRequest<RegistrationResult>(`/registrations/pass/${token}`)
+      .then((d) => {
+        setData(d);
+        setError(null);
+      })
+      .catch((err: any) => setError(err.message || 'This pass link is not valid.'))
+      .finally(() => setLoading(false));
+  }, [token]);
+
+  if (loading) {
+    return (
+      <div className="max-w-md mx-auto px-4 py-20 text-center">
+        <RefreshCw className="w-8 h-8 text-primary-600 animate-spin mx-auto mb-3" />
+        <p className="text-sm text-slate-500">Loading your entry pass…</p>
+      </div>
+    );
+  }
+
+  if (error || !data?.event) {
+    return (
+      <div className="max-w-md mx-auto px-4 py-20 text-center space-y-3">
+        <AlertTriangle className="w-10 h-10 text-red-500 mx-auto" />
+        <h2 className="text-lg font-bold text-slate-800">Pass unavailable</h2>
+        <p className="text-sm text-slate-600">{error || 'This pass link is not valid.'}</p>
+        <Link to="/" className="text-xs font-semibold text-primary-600">
+          Back to home &rarr;
+        </Link>
+      </div>
+    );
+  }
+
+  return (
+    <div className="max-w-md mx-auto px-4 py-10">
+      <RegistrationConfirmation registration={data} event={data.event} showQr={true} />
+    </div>
+  );
+}
+
+// ==========================================
 // PAGE: PUBLIC EVENT VIEW & BUILT-IN REGISTER
 // ==========================================
 function EventPage() {
@@ -811,7 +1363,7 @@ function EventPage() {
   const [regCourse, setRegCourse] = useState('');
   const [regYear, setRegYear] = useState('');
   const [regDesignation, setRegDesignation] = useState('Student');
-  const [regSuccess, setRegSuccess] = useState<{ id: string; registrationId: string } | null>(null);
+  const [regSuccess, setRegSuccess] = useState<RegistrationResult | null>(null);
   const [regError, setRegError] = useState<string | null>(null);
   const [regLoading, setRegLoading] = useState(false);
 
@@ -866,7 +1418,9 @@ function EventPage() {
 
       setRegSuccess({
         id: data.id,
-        registrationId: data.registrationId
+        registrationId: data.registrationId,
+        full_name: data.full_name,
+        event: data.event
       });
 
       // Clear form
@@ -1066,23 +1620,25 @@ function EventPage() {
                   )}
 
                   {regSuccess ? (
-                    <div className="bg-green-50 border border-green-200 rounded-lg p-6 text-center space-y-4">
-                      <CheckCircle className="w-12 h-12 text-green-500 mx-auto" />
-                      <h3 className="font-bold text-green-800 text-lg">Registration Success!</h3>
-                      <div className="space-y-2 text-slate-700 text-xs">
-                        <p>Welcome! Your entry code has been reserved.</p>
-                        <p className="font-mono bg-white border px-3 py-2 rounded font-bold text-slate-800 text-sm">
-                          ID: {regSuccess.registrationId}
-                        </p>
-                      </div>
-                      <div className="bg-white border rounded p-4 flex flex-col items-center space-y-2">
-                        <span className="text-[10px] text-slate-400 font-bold uppercase">Your Secure Entrance QR Pass</span>
-                        <div className="w-32 h-32 bg-slate-100 flex items-center justify-center font-mono text-[9px] text-slate-400 p-2 text-center rounded border border-dashed">
-                          QR OPAQUE PASS<br/>[Token Encrypted]<br/>{regSuccess.id.substring(0,8)}...
-                        </div>
-                        <span className="text-[9px] text-slate-400 text-center leading-normal">Contains opaque identifier token only. Contains absolute zero PII.</span>
-                      </div>
-                    </div>
+                    <RegistrationConfirmation
+                      registration={regSuccess}
+                      event={
+                        regSuccess.event || {
+                          id: event.id,
+                          name: event.name,
+                          start_date: event.start_date,
+                          end_date: event.end_date,
+                          start_time: event.start_time,
+                          end_time: event.end_time,
+                          venue: event.venue,
+                          format: event.format,
+                          meeting_link: event.meeting_link
+                        }
+                      }
+                      // Physical/hybrid events scan people in at the door, so
+                      // the QR pass is what they need on arrival.
+                      showQr={event.format !== 'online'}
+                    />
                   ) : (
                     <form onSubmit={handleRegisterSubmit} className="space-y-4">
                       <div className="space-y-1">
@@ -1338,6 +1894,7 @@ function Dashboard({ currentUser }: { currentUser: User }) {
           <Route path="/health" element={<AdminHealth />} />
           <Route path="/create-event" element={currentUser.role === 'volunteer' ? <ForbiddenNote /> : <CreateEventWizard />} />
           <Route path="/coordinators" element={<DeptCoordinators currentUser={currentUser} />} />
+          <Route path="/volunteers" element={<CoordinatorVolunteers currentUser={currentUser} />} />
           <Route path="/event-manager/:eventId/*" element={<EventManager currentUser={currentUser} />} />
         </Routes>
       </div>
@@ -1378,6 +1935,10 @@ function CoordinatorMenu() {
       <Link to="/dashboard/create-event" className="flex items-center space-x-3 px-3 py-2 rounded-lg hover:bg-slate-800 text-slate-300 transition">
         <Plus className="w-4 h-4 text-primary-400" />
         <span>Create Event</span>
+      </Link>
+      <Link to="/dashboard/volunteers" className="flex items-center space-x-3 px-3 py-2 rounded-lg hover:bg-slate-800 text-slate-300 transition">
+        <UserPlus className="w-4 h-4 text-primary-400" />
+        <span>Volunteers</span>
       </Link>
     </div>
   );
@@ -1461,19 +2022,121 @@ function DeptCoordinators({ currentUser }: { currentUser: User }) {
 // ==========================================
 // SUB-PAGE: DASHBOARD PORTAL OVERVIEW
 // ==========================================
+/**
+ * Coordinator dashboard: Event -> Volunteers -> Add Volunteer.
+ *
+ * Only events the coordinator is authorized to manage are selectable; the
+ * server re-checks authorization on every create (manage_volunteers).
+ */
+function CoordinatorVolunteers({ currentUser }: { currentUser: User }) {
+  const [events, setEvents] = useState<Event[]>([]);
+  const [eventId, setEventId] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    // /events is paginated and returns { events, total, page, ... } — not a
+    // bare array. Typing it as Event[] made `list.length` undefined, so this
+    // dropdown was permanently empty.
+    apiRequest<EventListResponse>('/events')
+      .then((d) => {
+        const list = d?.events || [];
+        setEvents(list);
+        setError(null);
+        if (list.length > 0) setEventId((prev) => prev || list[0].id);
+      })
+      .catch((err: any) => {
+        setEvents([]);
+        setError(err.message || 'Failed to load your events.');
+      })
+      .finally(() => setLoading(false));
+  }, []);
+
+  if (currentUser.role !== 'coordinator' && currentUser.role !== 'super_admin' && currentUser.role !== 'department_head') {
+    return (
+      <div className="bg-red-50 border border-red-200 rounded-xl p-6 text-red-700 text-sm font-semibold">
+        403 — Only Coordinators may manage volunteers.
+      </div>
+    );
+  }
+
+  const selected = events.find((e) => e.id === eventId);
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-3xl font-extrabold text-slate-800">Volunteers</h1>
+        <p className="text-sm text-slate-500 mt-1">
+          Choose one of your events, then add volunteers and grant scanner permissions.
+        </p>
+      </div>
+
+      <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-2">
+        <label className="block text-xs font-bold uppercase tracking-wider text-slate-500">Event</label>
+        {loading ? (
+          <p className="text-sm text-slate-500">Loading your events…</p>
+        ) : error ? (
+          <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-red-700 text-sm flex items-center space-x-2">
+            <AlertTriangle className="w-5 h-5 flex-shrink-0" />
+            <span className="font-medium">{error}</span>
+          </div>
+        ) : events.length === 0 ? (
+          <p className="text-sm text-slate-500">You are not assigned to any events yet.</p>
+        ) : (
+          <select
+            value={eventId}
+            onChange={(e) => setEventId(e.target.value)}
+            className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
+          >
+            {events.map((ev) => (
+              <option key={ev.id} value={ev.id}>
+                {ev.name}
+              </option>
+            ))}
+          </select>
+        )}
+      </div>
+
+      {selected && <EventTabVolunteers event={selected} />}
+    </div>
+  );
+}
+
 function DashboardOverview({ currentUser }: { currentUser: User }) {
   const [events, setEvents] = useState<Event[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const location = useLocation();
 
   useEffect(() => {
-    // List events that are visible or managed by this user
-    apiRequest<{ events: Event[] }>('/events')
+    // The server is the single source of truth for events — this list is
+    // always re-fetched, never restored from local/React state. Re-running on
+    // the authenticated user id covers "refetch after authentication", and on
+    // location.key covers returning here after creating an event.
+    let cancelled = false;
+    setLoading(true);
+
+    apiRequest<EventListResponse>('/events')
       .then((data) => {
-        setEvents(data.events || []);
+        if (cancelled) return;
+        setEvents(data?.events || []);
+        setError(null);
       })
-      .catch(() => {})
-      .finally(() => setLoading(false));
-  }, []);
+      .catch((err: any) => {
+        if (cancelled) return;
+        // Never hide a failure behind an empty list: an empty "Manage Events"
+        // screen is indistinguishable from "my events disappeared".
+        setEvents([]);
+        setError(err.message || 'Failed to load your events.');
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUser.id, location.key]);
 
   return (
     <div className="space-y-8">
@@ -1519,6 +2182,15 @@ function DashboardOverview({ currentUser }: { currentUser: User }) {
             <div className="py-12 text-center">
               <RefreshCw className="w-8 h-8 text-primary-600 animate-spin mx-auto mb-2" />
               <p className="text-xs text-slate-500">Loading events directory...</p>
+            </div>
+          ) : error ? (
+            <div className="bg-red-50 border border-red-200 rounded-2xl p-8 text-center max-w-lg mx-auto space-y-3">
+              <AlertTriangle className="w-10 h-10 text-red-500 mx-auto" />
+              <h3 className="font-bold text-red-800 text-lg">Could not load your events</h3>
+              <p className="text-red-700 text-sm">{error}</p>
+              <p className="text-red-600 text-xs">
+                Your events have not been deleted — the server could not be reached. Please retry.
+              </p>
             </div>
           ) : events.length === 0 ? (
             <div className="bg-white border border-dashed border-slate-300 rounded-2xl p-12 text-center max-w-lg mx-auto">
@@ -3635,7 +4307,10 @@ function EventTabScanners({ event }: { event: Event }) {
       const status = code === 'ALREADY_CLAIMED' ? 'YELLOW' : 'RED';
       setScannerResult({
         status,
-        message: err.message || 'Failed to scan pass.'
+        message: err.message || 'Failed to scan pass.',
+        // On an "already checked in" conflict the server tells us who it was,
+        // so the operator can confirm they scanned the right person.
+        name: err.details?.participant?.name
       });
     } finally {
       setScanLoading(false);
@@ -3764,24 +4439,35 @@ function EventTabScanners({ event }: { event: Event }) {
             </span>
             <div id="qr-scanner-element" className="w-full max-w-sm rounded-xl overflow-hidden bg-slate-950 border border-slate-800"></div>
             
-            {/* Manual Entry Fallback */}
-            <div className="w-full max-w-sm flex items-center space-x-2 pt-2">
-              <input
-                type="text"
-                placeholder="Enter token ID manually..."
-                value={manualToken}
-                onChange={(e) => setManualToken(e.target.value)}
-                className="bg-slate-800 text-white border border-slate-700 px-3 py-2 rounded-lg text-xs flex-grow focus:outline-none focus:ring-1 focus:ring-primary-500 font-mono"
-              />
-              <button
-                onClick={() => {
-                  if (manualToken.trim()) executeScanAction(manualToken.trim());
-                }}
-                className="bg-white text-slate-900 hover:bg-slate-100 text-xs font-bold px-4 py-2 rounded-lg transition"
-              >
-                Validate
-              </button>
-            </div>
+            {/* Manual Entry Fallback — accepts the Registration ID printed on
+                the participant's pass, or a scanned pass token. The server
+                resolves both to the same registration record. */}
+            <form
+              className="w-full max-w-sm space-y-1.5 pt-2"
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (manualToken.trim()) executeScanAction(manualToken.trim());
+              }}
+            >
+              <div className="flex items-center space-x-2">
+                <input
+                  type="text"
+                  placeholder="e.g. DSMNRU-DEMO-6K8KGU"
+                  value={manualToken}
+                  onChange={(e) => setManualToken(e.target.value)}
+                  className="bg-slate-800 text-white border border-slate-700 px-3 py-2 rounded-lg text-xs flex-grow focus:outline-none focus:ring-1 focus:ring-primary-500 font-mono"
+                />
+                <button
+                  type="submit"
+                  className="bg-white text-slate-900 hover:bg-slate-100 text-xs font-bold px-4 py-2 rounded-lg transition"
+                >
+                  Validate
+                </button>
+              </div>
+              <p className="text-[10px] text-slate-500">
+                Enter the participant's Registration ID if their QR won't scan.
+              </p>
+            </form>
           </div>
 
           {/* Feedback Screen */}
@@ -4506,6 +5192,8 @@ function EventTabVolunteers({ event }: { event: Event }) {
   const [scanAtt, setScanAtt] = useState(true);
   const [scanRes, setScanRes] = useState(false);
   const [token, setToken] = useState<string | null>(null);
+  const [created, setCreated] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
   const [list, setList] = useState<any[]>([]);
 
   const load = () => {
@@ -4523,25 +5211,42 @@ function EventTabVolunteers({ event }: { event: Event }) {
             ...(scanAtt ? ['SCAN_ATTENDANCE'] : []),
             ...(scanRes ? ['SCAN_RESOURCE'] : [])
           ];
-          const res = await apiRequest<any>('/staff/volunteers', {
-            method: 'POST',
-            body: JSON.stringify({ email, full_name: name, phone, event_id: event.id, permissions })
-          });
-          setToken(res.setup_token || null);
-          setName('');
-          setEmail('');
-          setPhone('');
-          load();
+          setErr(null);
+          try {
+            const res = await apiRequest<any>('/staff/volunteers', {
+              method: 'POST',
+              body: JSON.stringify({ email, full_name: name, phone, event_id: event.id, permissions })
+            });
+            setToken(res.setup_token || null);
+            setCreated(res.email || email);
+            setName('');
+            setEmail('');
+            setPhone('');
+            load();
+          } catch (e2: any) {
+            setErr(e2.message || 'Could not create volunteer');
+          }
         }}
       >
-        <h2 className="font-bold text-slate-800">Add volunteer</h2>
+        <h2 className="font-bold text-slate-800">Add Volunteer</h2>
+        {err && <p className="text-xs text-red-600 font-semibold">{err}</p>}
         <input className="w-full border rounded px-3 py-2 text-sm" placeholder="Name" value={name} onChange={(e) => setName(e.target.value)} required />
         <input className="w-full border rounded px-3 py-2 text-sm" placeholder="Email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
         <input className="w-full border rounded px-3 py-2 text-sm" placeholder="Phone (optional)" value={phone} onChange={(e) => setPhone(e.target.value)} />
         <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={scanAtt} onChange={(e) => setScanAtt(e.target.checked)} /> SCAN_ATTENDANCE</label>
         <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={scanRes} onChange={(e) => setScanRes(e.target.checked)} /> SCAN_RESOURCE</label>
         <button className="bg-primary-600 text-white text-xs font-bold px-4 py-2 rounded">Create volunteer</button>
-        {token && <p className="text-xs">Setup: /setup-password?token={token}</p>}
+        {created && (
+          <div className="bg-emerald-50 border border-emerald-200 rounded p-3 text-xs text-emerald-800 space-y-1">
+            <p className="font-bold">Volunteer created.</p>
+            <p>
+              They sign in with <span className="font-mono">{created}</span> and their{' '}
+              <span className="font-bold">email address as the initial password</span>. They must set a new
+              password on first login before they can use the portal.
+            </p>
+            {token && <p className="text-[11px] text-emerald-700">Alternative setup link: /setup-password?token={token}</p>}
+          </div>
+        )}
       </form>
       <div className="bg-white border rounded-xl p-6">
         <h3 className="font-bold text-sm mb-3">Assigned volunteers</h3>

@@ -12,7 +12,8 @@ Represents users (Super Admins, Department Heads, Coordinators, Volunteers).
 - `full_name` TEXT NOT NULL
 - `phone` TEXT
 - `role` TEXT NOT NULL (e.g. 'super_admin', 'department_head', 'coordinator', 'volunteer')
-- `status` TEXT NOT NULL DEFAULT 'pending' (pending, active, suspended)
+- `status` TEXT NOT NULL DEFAULT 'invited' (pending, invited, active, suspended)
+- `password_set` INTEGER NOT NULL DEFAULT 0 (0 until the invitee completes `/auth/setup-password`)
 - `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP
 - `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP
 
@@ -291,3 +292,63 @@ To ensure optimal performance and eliminate `SELECT *` table scans:
 - Index on `certificate_records(id)` (Primary/Unique for verification)
 - Index on `audit_logs(timestamp)` and `audit_logs(user_id)`
 - Index on `email_queue(status, next_retry)`
+
+---
+
+## Migrations
+
+Apply migrations with the repo's runner, from `backend/`:
+
+```bash
+npm run db:migrate              # local
+npm run db:migrate -- --remote  # production
+```
+
+| File | Purpose |
+| --- | --- |
+| `0001_schema.sql` | Full base schema (all tables + indexes). |
+| `0002_rbac.sql` | Incremental RBAC objects for databases created before 0001 included them. |
+| `0003_add_password_set.sql` | Repairs `users.password_set` on databases that applied 0001 before that column was added to it. |
+
+### Schema drift repair (0003)
+
+`users.password_set` was added to `0001_schema.sql` *after* 0001 had already been
+applied to existing databases. Those databases therefore report 0001 and 0002 as
+applied in `d1_migrations` while their `users` table has no `password_set`
+column, and `wrangler d1 migrations apply` correctly reports "No migrations to
+apply". Every staff INSERT (`POST /staff/department-heads`, `/coordinators`,
+`/volunteers`) then fails with:
+
+```
+D1_ERROR: table users has no column named password_set
+```
+
+`0003_add_password_set.sql` fixes this **without** rewriting 0001/0002 history.
+
+Two constraints shape how it is applied:
+
+1. SQLite/D1 has no `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, so the file
+   cannot guard itself — running it on a fresh database (where 0001 already
+   creates the column) fails with `duplicate column name: password_set`.
+2. Rebuilding `users` (`CREATE new` + `DROP`/`RENAME`) is **data-destructive** on
+   D1: the drop fires `ON DELETE CASCADE` and wipes `department_members`,
+   `event_members`, `sessions` and `account_setup_tokens`. D1 does not allow
+   `PRAGMA foreign_keys = off`, and `defer_foreign_keys` does not stop cascades.
+
+So `npm run db:migrate` (`backend/scripts/migrate.mjs`) inspects the live schema
+before delegating to wrangler:
+
+| Database state | Action |
+| --- | --- |
+| `users.password_set` missing (legacy / production) | 0003 is **executed**, adding the column in place. |
+| Fresh database, or column already present | 0003 is **recorded as applied without executing it**. |
+| 0003 already in `d1_migrations` | No-op. |
+
+Both paths converge on an identical `users` schema, and the runner verifies
+`users.password_set` exists afterwards, exiting non-zero if it does not.
+
+Verify manually at any time:
+
+```bash
+npx wrangler d1 execute dsmnru-eventhub-db --local --command "PRAGMA table_info(users);"
+```

@@ -32,7 +32,12 @@ events.get('/', async (c) => {
     LEFT JOIN departments d ON e.department_id = d.id
     WHERE 1=1
   `;
-  let countQuery = 'SELECT COUNT(*) as count FROM events WHERE 1=1';
+  // NOTE: the alias `e` is required. Every filter appended below is written in
+  // terms of `e.<column>` so that it can be shared with the SELECT above; a
+  // bare `FROM events` made D1 reject the count with "no such column: e.status"
+  // and turned the whole listing into a 500 for anonymous, department head and
+  // coordinator users (events looked like they had vanished after a refresh).
+  let countQuery = 'SELECT COUNT(*) as count FROM events e WHERE 1=1';
   const params: any[] = [];
   const countParams: any[] = [];
 
@@ -42,7 +47,7 @@ events.get('/', async (c) => {
     countQuery += " AND e.status != 'DRAFT'";
   } else if (user.role === 'volunteer') {
     query += " AND e.id IN (SELECT event_id FROM event_members WHERE user_id = ? AND role = 'volunteer')";
-    countQuery += " AND id IN (SELECT event_id FROM event_members WHERE user_id = ? AND role = 'volunteer')";
+    countQuery += " AND e.id IN (SELECT event_id FROM event_members WHERE user_id = ? AND role = 'volunteer')";
     params.push(user.id);
     countParams.push(user.id);
   } else if (user.role === 'department_head') {

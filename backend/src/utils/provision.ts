@@ -38,7 +38,9 @@ export async function consumeSetupToken(
   }
 
   await db
-    .prepare(`UPDATE users SET password_hash = ?, status = 'active', password_set = 1, updated_at = datetime('now') WHERE id = ?`)
+    .prepare(
+      `UPDATE users SET password_hash = ?, status = 'active', password_set = 1, force_password_change = 0, updated_at = datetime('now') WHERE id = ?`
+    )
     .bind(newPasswordHash, row.user_id)
     .run();
   await db.prepare(`UPDATE account_setup_tokens SET used_at = datetime('now') WHERE id = ?`).bind(row.id).run();
@@ -47,6 +49,44 @@ export async function consumeSetupToken(
 
 export async function placeholderPasswordHash(): Promise<string> {
   return hashPassword(generateOpaqueToken(24));
+}
+
+/**
+ * Initial password for accounts provisioned by the role hierarchy.
+ *
+ * The user's own email address is the initial password. Only its PBKDF2 hash is
+ * ever stored — the plaintext is never persisted or logged. It is accepted for
+ * the first successful login only: that login is gated by
+ * force_password_change = 1, and completing the change sets password_set = 1 /
+ * force_password_change = 0, which invalidates it immediately.
+ */
+export async function initialPasswordHashForEmail(email: string): Promise<string> {
+  return hashPassword(email.toLowerCase());
+}
+
+/**
+ * Completes a forced password change for a first-login session.
+ *
+ * Clears the gate, marks the password as user-chosen, and (by the caller
+ * invalidating sessions) makes the initial email-as-password unusable.
+ */
+export async function completeForcedPasswordChange(
+  db: D1Database,
+  userId: string,
+  newPasswordHash: string
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE users
+         SET password_hash = ?,
+             status = 'active',
+             password_set = 1,
+             force_password_change = 0,
+             updated_at = datetime('now')
+       WHERE id = ?`
+    )
+    .bind(newPasswordHash, userId)
+    .run();
 }
 
 export async function invalidateSessions(db: D1Database, userId: string) {

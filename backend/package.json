@@ -9,6 +9,7 @@
     "cf-typegen": "wrangler types",
     "lint": "eslint --ext .ts src",
     "typecheck": "tsc --noEmit",
+    "db:migrate": "node scripts/migrate.mjs",
     "test": "npx --yes tsx src/tests/run_tests.ts"
   },
   "dependencies": {

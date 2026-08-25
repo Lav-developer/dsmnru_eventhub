@@ -5,6 +5,7 @@ import { logAudit } from '../utils/audit';
 import { rateLimit, limits } from '../utils/rateLimit';
 import { HonoTypes, User } from '../types';
 import { authorizeEventAction } from '../utils/authorize';
+import { requireRegistrationForEvent } from '../utils/resolveRegistration';
 
 const operations = new Hono<HonoTypes>();
 
@@ -19,23 +20,27 @@ operations.post('/events/:id/attendance/scan', rateLimit('scan', limits.scan), a
   }
   const eventId = c.req.param('id') || '';
   const body = await c.req.json().catch(() => ({}));
-  const { opaque_token, attendance_type = 'event_entry' } = body;
+  const { opaque_token, registration_id, attendance_type = 'event_entry' } = body;
 
-  if (!opaque_token) {
-    throw new AppError('Opaque token is missing', 'VALIDATION_ERROR', 400);
+  // A scanner may present either the QR payload (opaque pass token) or the
+  // human-readable registration code typed in manually. Both are accepted on
+  // the same field so existing clients keep working; registration_id is
+  // supported as an explicit alias.
+  const identifier = opaque_token || registration_id;
+
+  if (!identifier) {
+    throw new AppError(
+      'Provide the scanned pass or a registration ID',
+      'VALIDATION_ERROR',
+      400
+    );
   }
 
   await authorizeEventAction(db, user, eventId, 'scan_attendance');
 
-  // Look up participant from token
-  const reg = await db
-    .prepare('SELECT id, full_name, registration_id, email, college FROM event_registrations WHERE event_id = ? AND qr_token = ?')
-    .bind(eventId, opaque_token)
-    .first<any>();
-
-  if (!reg) {
-    throw new AppError('Invalid event pass: participant not registered for this event', 'INVALID_PASS', 404);
-  }
+  // Resolves BOTH identifier forms to the same event_registrations row, always
+  // scoped to this event. Throws INVALID_PASS when nothing matches.
+  const reg = await requireRegistrationForEvent(db, eventId, identifier);
 
   try {
     const attendanceId = crypto.randomUUID();
@@ -172,10 +177,17 @@ operations.post('/events/:id/resources/:resourceId/scan', rateLimit('scan', limi
   const eventId = c.req.param('id') || '';
   const resourceId = c.req.param('resourceId') || '';
   const body = await c.req.json().catch(() => ({}));
-  const { opaque_token } = body;
+  const { opaque_token, registration_id } = body;
 
-  if (!opaque_token) {
-    throw new AppError('Opaque token is missing', 'VALIDATION_ERROR', 400);
+  // Same dual-identifier handling as the attendance scanner.
+  const identifier = opaque_token || registration_id;
+
+  if (!identifier) {
+    throw new AppError(
+      'Provide the scanned pass or a registration ID',
+      'VALIDATION_ERROR',
+      400
+    );
   }
 
   await authorizeEventAction(db, user, eventId, 'scan_resource');
@@ -199,15 +211,9 @@ operations.post('/events/:id/resources/:resourceId/scan', rateLimit('scan', limi
     throw new AppError('This resource is currently marked inactive', 'RESOURCE_INACTIVE', 400);
   }
 
-  // Look up participant from opaque revocable qr_token
-  const reg = await db
-    .prepare('SELECT id, full_name, registration_id, email, college FROM event_registrations WHERE event_id = ? AND qr_token = ?')
-    .bind(eventId, opaque_token)
-    .first<any>();
-
-  if (!reg) {
-    throw new AppError('Invalid event pass: participant not registered for this event', 'INVALID_PASS', 404);
-  }
+  // Resolves the QR pass token OR the manual registration code to the same
+  // event_registrations row, scoped to this event.
+  const reg = await requireRegistrationForEvent(db, eventId, identifier);
 
   // If eligibility is 'attendees', check if they have checked in
   if (resource.eligibility === 'attendees') {

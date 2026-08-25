@@ -5,7 +5,7 @@ import { logAudit } from '../utils/audit';
 import { rateLimit, limits } from '../utils/rateLimit';
 import { HonoTypes } from '../types';
 import { getUserDepartmentId } from '../utils/authorize';
-import { consumeSetupToken } from '../utils/provision';
+import { completeForcedPasswordChange, consumeSetupToken, invalidateSessions } from '../utils/provision';
 
 const auth = new Hono<HonoTypes>();
 
@@ -50,7 +50,9 @@ auth.post('/login', rateLimit('auth', limits.auth), async (c) => {
   }
 
   const user = await db
-    .prepare('SELECT id, email, password_hash, full_name, role, status FROM users WHERE email = ?')
+    .prepare(
+      'SELECT id, email, password_hash, full_name, role, status, password_set, force_password_change FROM users WHERE email = ?'
+    )
     .bind(email.toLowerCase())
     .first<any>();
 
@@ -87,22 +89,129 @@ auth.post('/login', rateLimit('auth', limits.auth), async (c) => {
   }
   c.header('Set-Cookie', cookieStr);
 
-  await logAudit(db, user.id, user.email, 'LOGIN', 'user', user.id, { role: user.role }, c.req.header('CF-Connecting-IP'));
+  const forcePasswordChange = Number(user.force_password_change) === 1;
+
+  await logAudit(
+    db,
+    user.id,
+    user.email,
+    'LOGIN',
+    'user',
+    user.id,
+    { role: user.role, force_password_change: forcePasswordChange },
+    c.req.header('CF-Connecting-IP')
+  );
 
   const department_id = await getUserDepartmentId(db, user.id);
 
   return c.json({
     success: true,
     data: {
+      // Server-side truth. The client uses this only to route the user to the
+      // change-password screen; every API is gated independently server-side.
+      force_password_change: forcePasswordChange,
+      password_set: Number(user.password_set) === 1,
       user: {
         id: user.id,
         email: user.email,
         full_name: user.full_name,
         role: user.role,
         status: user.status,
-        department_id
+        department_id,
+        password_set: Number(user.password_set) === 1,
+        force_password_change: forcePasswordChange
       }
     }
+  });
+});
+
+/**
+ * Change password for the currently authenticated session.
+ *
+ * Used both for the mandatory first-login change (force_password_change = 1)
+ * and for ordinary voluntary password changes. Requires the authenticated
+ * session, verifies the current password, then rotates the session so the old
+ * one — including the initial email-as-password session — is dead.
+ */
+auth.post('/change-password', rateLimit('auth', limits.auth), async (c) => {
+  const db = c.env.DB;
+  const actor = c.get('user');
+  const session = c.get('session');
+
+  if (!actor) {
+    throw new AppError('Unauthorized: Authentication required', 'UNAUTHORIZED', 401);
+  }
+
+  const body = await c.req.json().catch(() => ({}));
+  const { current_password, new_password } = body;
+
+  if (!current_password || !new_password) {
+    throw new AppError('Missing current_password or new_password', 'VALIDATION_ERROR', 400);
+  }
+  assertPasswordPolicy(new_password);
+
+  const row = await db
+    .prepare('SELECT id, email, password_hash FROM users WHERE id = ?')
+    .bind(actor.id)
+    .first<{ id: string; email: string; password_hash: string }>();
+  if (!row) {
+    throw new AppError('User not found', 'NOT_FOUND', 404);
+  }
+
+  const validCurrent = await verifyPassword(current_password, row.password_hash);
+  if (!validCurrent) {
+    throw new AppError('Current password is incorrect', 'INVALID_CREDENTIALS', 401);
+  }
+
+  // The new password may not be the email-as-password again, otherwise the
+  // initial credential would remain valid.
+  if (new_password.toLowerCase() === row.email.toLowerCase()) {
+    throw new AppError(
+      'Your new password cannot be the same as your email address',
+      'VALIDATION_ERROR',
+      400
+    );
+  }
+  if (new_password === current_password) {
+    throw new AppError('Your new password must be different from the current one', 'VALIDATION_ERROR', 400);
+  }
+
+  const newHash = await hashPassword(new_password);
+  await completeForcedPasswordChange(db, row.id, newHash);
+
+  // Invalidate every existing session (including this first-login one), then
+  // issue a fresh authenticated session.
+  await invalidateSessions(db, row.id);
+
+  const sessionId = generateUUID();
+  const sessionToken = generateOpaqueToken(32);
+  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+  await db
+    .prepare(`INSERT INTO sessions (id, user_id, token, expires_at) VALUES (?, ?, ?, ?)`)
+    .bind(sessionId, row.id, sessionToken, expiresAt)
+    .run();
+
+  const isProd = c.env.ENV === 'production';
+  let cookieStr = `session_token=${sessionToken}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${7 * 24 * 60 * 60}`;
+  if (isProd) {
+    cookieStr += '; Secure';
+  }
+  c.header('Set-Cookie', cookieStr);
+
+  await logAudit(
+    db,
+    row.id,
+    row.email,
+    'CHANGE_PASSWORD',
+    'user',
+    row.id,
+    { forced: !!actor.force_password_change, previous_session: session?.id || null },
+    c.req.header('CF-Connecting-IP')
+  );
+
+  return c.json({
+    success: true,
+    data: { message: 'Password updated. Your new password is now required to log in.' }
   });
 });
 
@@ -134,7 +243,11 @@ auth.get('/me', async (c) => {
   const department_id = await getUserDepartmentId(c.env.DB, user.id);
   return c.json({
     success: true,
-    data: { user: { ...user, department_id } }
+    data: {
+      force_password_change: !!user.force_password_change,
+      password_set: !!user.password_set,
+      user: { ...user, department_id }
+    }
   });
 });
 
