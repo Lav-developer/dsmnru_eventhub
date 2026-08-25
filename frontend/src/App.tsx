@@ -4307,7 +4307,10 @@ function EventTabScanners({ event }: { event: Event }) {
       const status = code === 'ALREADY_CLAIMED' ? 'YELLOW' : 'RED';
       setScannerResult({
         status,
-        message: err.message || 'Failed to scan pass.'
+        message: err.message || 'Failed to scan pass.',
+        // On an "already checked in" conflict the server tells us who it was,
+        // so the operator can confirm they scanned the right person.
+        name: err.details?.participant?.name
       });
     } finally {
       setScanLoading(false);
@@ -4436,24 +4439,35 @@ function EventTabScanners({ event }: { event: Event }) {
             </span>
             <div id="qr-scanner-element" className="w-full max-w-sm rounded-xl overflow-hidden bg-slate-950 border border-slate-800"></div>
             
-            {/* Manual Entry Fallback */}
-            <div className="w-full max-w-sm flex items-center space-x-2 pt-2">
-              <input
-                type="text"
-                placeholder="Enter token ID manually..."
-                value={manualToken}
-                onChange={(e) => setManualToken(e.target.value)}
-                className="bg-slate-800 text-white border border-slate-700 px-3 py-2 rounded-lg text-xs flex-grow focus:outline-none focus:ring-1 focus:ring-primary-500 font-mono"
-              />
-              <button
-                onClick={() => {
-                  if (manualToken.trim()) executeScanAction(manualToken.trim());
-                }}
-                className="bg-white text-slate-900 hover:bg-slate-100 text-xs font-bold px-4 py-2 rounded-lg transition"
-              >
-                Validate
-              </button>
-            </div>
+            {/* Manual Entry Fallback — accepts the Registration ID printed on
+                the participant's pass, or a scanned pass token. The server
+                resolves both to the same registration record. */}
+            <form
+              className="w-full max-w-sm space-y-1.5 pt-2"
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (manualToken.trim()) executeScanAction(manualToken.trim());
+              }}
+            >
+              <div className="flex items-center space-x-2">
+                <input
+                  type="text"
+                  placeholder="e.g. DSMNRU-DEMO-6K8KGU"
+                  value={manualToken}
+                  onChange={(e) => setManualToken(e.target.value)}
+                  className="bg-slate-800 text-white border border-slate-700 px-3 py-2 rounded-lg text-xs flex-grow focus:outline-none focus:ring-1 focus:ring-primary-500 font-mono"
+                />
+                <button
+                  type="submit"
+                  className="bg-white text-slate-900 hover:bg-slate-100 text-xs font-bold px-4 py-2 rounded-lg transition"
+                >
+                  Validate
+                </button>
+              </div>
+              <p className="text-[10px] text-slate-500">
+                Enter the participant's Registration ID if their QR won't scan.
+              </p>
+            </form>
           </div>
 
           {/* Feedback Screen */}

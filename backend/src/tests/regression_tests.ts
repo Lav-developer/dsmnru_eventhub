@@ -677,6 +677,234 @@ async function testAuthSurvivesMissingOptionalColumn() {
   console.log('✅ Regression Test 15 Passed!');
 }
 
+// ---------------------------------------------------------------------------
+// R16. Scanner consistency: QR payload and manual Registration ID must resolve
+//      to the SAME event_registration record.
+//
+// Uses the exact identifiers from the bug report.
+// ---------------------------------------------------------------------------
+const DEMO_EVENT_ID = '69e03c60-d9b3-4e51-beec-fd769accd67f';
+const DEMO_REG_CODE = 'DSMNRU-DEMO-6K8KGU';
+
+/** Seeds the reported event + registration verbatim, returning the QR payload. */
+async function seedDemoScanFixture(ctx: Ctx) {
+  const dept = seedDepartment(ctx);
+  await seedActiveUser(ctx, {
+    id: 'coord',
+    email: 'coord@dsmnru.test',
+    role: 'coordinator',
+    password: 'CoordSecret123',
+    departmentId: dept
+  });
+
+  ctx.d1.db
+    .prepare(
+      `INSERT INTO events (id, slug, name, short_name, event_type, department_id, start_date, end_date,
+        start_time, end_time, venue, format, registration_type, status)
+       VALUES (?, 'demo-event', 'Demo Event', 'DEMO', 'seminar', ?, '2026-03-01', '2026-03-02',
+               '10:00', '17:00', 'Main Hall', 'offline', 'built_in', 'REGISTRATION_OPEN')`
+    )
+    .run(DEMO_EVENT_ID, dept);
+
+  assign(ctx, DEMO_EVENT_ID, 'coord', 'coordinator');
+
+  // A realistic opaque pass: 64 lowercase hex chars, as generateOpaqueToken(32) emits.
+  const qrToken = 'b3f1'.repeat(16);
+  ctx.d1.db
+    .prepare(
+      `INSERT INTO event_registrations (id, event_id, registration_id, full_name, email, phone,
+        college, department, course, year, designation, qr_token)
+       VALUES ('demo-reg-uuid', ?, ?, 'Demo Participant', 'demo@student.test', '9000000000',
+               'DSMNRU', 'Computer Science', 'MCA', '2', 'Student', ?)`
+    )
+    .run(DEMO_EVENT_ID, DEMO_REG_CODE, qrToken);
+
+  return { dept, qrToken };
+}
+
+function scanAttendance(ctx: Ctx, cookie: string, eventId: string, payload: any) {
+  return call(ctx, `/api/v1/operations/events/${eventId}/attendance/scan`, {
+    method: 'POST',
+    cookie,
+    body: payload
+  });
+}
+
+async function testScannerResolvesQrAndManualIdIdentically() {
+  console.log('\nRunning Regression Test 16: QR scan and manual Registration ID agree...');
+  const ctx = freshDb();
+  const { qrToken } = await seedDemoScanFixture(ctx);
+  const cookie = await login(ctx, 'coord@dsmnru.test', 'CoordSecret123');
+
+  // (a) QR payload scan marks the participant present.
+  const viaQr = await scanAttendance(ctx, cookie, DEMO_EVENT_ID, { opaque_token: qrToken });
+  if (viaQr.status !== 200 || viaQr.body?.data?.status !== 'GREEN') {
+    throw new Error(`QR scan should mark attendance, got ${viaQr.status} ${JSON.stringify(viaQr.body)}`);
+  }
+  if (viaQr.body?.data?.participant?.registrationId !== DEMO_REG_CODE) {
+    throw new Error('QR scan resolved to the wrong participant');
+  }
+
+  // (b) The SAME participant by manual Registration ID must not 404. It is the
+  // same record, so this is the idempotent "already checked in" response.
+  const viaCode = await scanAttendance(ctx, cookie, DEMO_EVENT_ID, {
+    opaque_token: DEMO_REG_CODE
+  });
+  if (viaCode.status === 404) {
+    throw new Error(
+      'Manual Registration ID returned INVALID_PASS for a participant that scans fine — the reported bug'
+    );
+  }
+  if (viaCode.status !== 409 || viaCode.body?.error?.code !== 'ALREADY_CLAIMED') {
+    throw new Error(
+      `Manual scan of an already-present participant must be idempotent, got ${viaCode.status} ${JSON.stringify(viaCode.body)}`
+    );
+  }
+  if (viaCode.body?.error?.participant?.registrationId !== DEMO_REG_CODE) {
+    throw new Error('Idempotent response must identify the same participant');
+  }
+
+  // Both paths resolved to exactly ONE attendance row, against the internal UUID.
+  const rows = ctx.d1.db
+    .prepare('SELECT registration_id FROM attendance WHERE event_id = ?')
+    .all(DEMO_EVENT_ID) as any[];
+  if (rows.length !== 1) {
+    throw new Error(`Expected exactly one attendance row, found ${rows.length}`);
+  }
+  if (rows[0].registration_id !== 'demo-reg-uuid') {
+    throw new Error(
+      `Attendance must reference the internal registration UUID, got ${rows[0].registration_id}`
+    );
+  }
+
+  console.log('✅ Regression Test 16 Passed!');
+}
+
+async function testManualIdMarksAttendanceOnFirstScan() {
+  console.log('\nRunning Regression Test 17: manual Registration ID alone marks attendance...');
+  const ctx = freshDb();
+  await seedDemoScanFixture(ctx);
+  const cookie = await login(ctx, 'coord@dsmnru.test', 'CoordSecret123');
+
+  // No QR scan first: typing the code must itself check the participant in.
+  const first = await scanAttendance(ctx, cookie, DEMO_EVENT_ID, {
+    opaque_token: DEMO_REG_CODE
+  });
+  if (first.status !== 200 || first.body?.data?.status !== 'GREEN') {
+    throw new Error(
+      `Manual Registration ID must mark attendance, got ${first.status} ${JSON.stringify(first.body)}`
+    );
+  }
+
+  // The explicit registration_id field is accepted too.
+  const ctx2 = freshDb();
+  await seedDemoScanFixture(ctx2);
+  const cookie2 = await login(ctx2, 'coord@dsmnru.test', 'CoordSecret123');
+  const viaField = await scanAttendance(ctx2, cookie2, DEMO_EVENT_ID, {
+    registration_id: DEMO_REG_CODE
+  });
+  if (viaField.status !== 200 || viaField.body?.data?.status !== 'GREEN') {
+    throw new Error(`registration_id field must be accepted, got ${viaField.status}`);
+  }
+
+  // Casing is normalized: the same code in lowercase is the same person.
+  const repeat = await scanAttendance(ctx2, cookie2, DEMO_EVENT_ID, {
+    registration_id: DEMO_REG_CODE.toLowerCase()
+  });
+  if (repeat.status !== 409) {
+    throw new Error(`Lowercase registration code must resolve to the same record, got ${repeat.status}`);
+  }
+
+  console.log('✅ Regression Test 17 Passed!');
+}
+
+async function testScannerValidationNotWeakened() {
+  console.log('\nRunning Regression Test 18: scanner validation is not weakened...');
+  const ctx = freshDb();
+  const { qrToken } = await seedDemoScanFixture(ctx);
+  const cookie = await login(ctx, 'coord@dsmnru.test', 'CoordSecret123');
+
+  // A second event, with its own registration, in the same department.
+  const otherEventId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+  ctx.d1.db
+    .prepare(
+      `INSERT INTO events (id, slug, name, short_name, event_type, department_id, start_date, end_date,
+        start_time, end_time, venue, format, registration_type, status)
+       VALUES (?, 'other-event', 'Other Event', 'OTHER', 'seminar', 'dept-cs', '2026-04-01', '2026-04-02',
+               '10:00', '17:00', 'Hall B', 'offline', 'built_in', 'REGISTRATION_OPEN')`
+    )
+    .run(otherEventId);
+  assign(ctx, otherEventId, 'coord', 'coordinator');
+
+  // 1. A pass from another event must be rejected, by BOTH identifier forms.
+  const crossQr = await scanAttendance(ctx, cookie, otherEventId, { opaque_token: qrToken });
+  if (crossQr.status !== 404 || crossQr.body?.error?.code !== 'INVALID_PASS') {
+    throw new Error(`A QR pass from another event must be rejected, got ${crossQr.status}`);
+  }
+  const crossCode = await scanAttendance(ctx, cookie, otherEventId, {
+    registration_id: DEMO_REG_CODE
+  });
+  if (crossCode.status !== 404 || crossCode.body?.error?.code !== 'INVALID_PASS') {
+    throw new Error(`A registration code from another event must be rejected, got ${crossCode.status}`);
+  }
+  const leaked = ctx.d1.db
+    .prepare('SELECT COUNT(*) c FROM attendance WHERE event_id = ?')
+    .get(otherEventId) as any;
+  if (leaked.c !== 0) throw new Error('A cross-event scan actually recorded attendance');
+
+  // 2. Fabricated identifiers must be rejected.
+  for (const bogus of [
+    'DSMNRU-DEMO-ZZZZZZ',
+    'DSMNRU-DEMO-6K8KG',
+    'f'.repeat(64),
+    'demo-reg-uuid',
+    "' OR 1=1 --"
+  ]) {
+    const res = await scanAttendance(ctx, cookie, DEMO_EVENT_ID, { opaque_token: bogus });
+    if (res.status !== 404 || res.body?.error?.code !== 'INVALID_PASS') {
+      throw new Error(`Fabricated identifier "${bogus}" must be rejected, got ${res.status}`);
+    }
+  }
+
+  // 3. The internal UUID is NOT an accepted client identifier (checked above via
+  //    'demo-reg-uuid'), so attendance still has no rows for the demo event.
+  const demoRows = ctx.d1.db
+    .prepare('SELECT COUNT(*) c FROM attendance WHERE event_id = ?')
+    .get(DEMO_EVENT_ID) as any;
+  if (demoRows.c !== 0) {
+    throw new Error('An internal UUID or fabricated ID was accepted as a pass');
+  }
+
+  // 4. Empty input is a validation error, never a lookup.
+  const empty = await scanAttendance(ctx, cookie, DEMO_EVENT_ID, {});
+  if (empty.status !== 400) throw new Error(`Missing identifier must be a 400, got ${empty.status}`);
+
+  // 5. Unauthorized scanner access is still refused.
+  const outsiderDept = seedDepartment(ctx, 'dept-me', 'Mechanical', 'ME');
+  await seedActiveUser(ctx, {
+    id: 'outsider',
+    email: 'outsider@dsmnru.test',
+    role: 'coordinator',
+    password: 'OtherSecret123',
+    departmentId: outsiderDept
+  });
+  const outsiderCookie = await login(ctx, 'outsider@dsmnru.test', 'OtherSecret123');
+  const denied = await scanAttendance(ctx, outsiderCookie, DEMO_EVENT_ID, {
+    registration_id: DEMO_REG_CODE
+  });
+  if (denied.status !== 403) {
+    throw new Error(`A scanner from another department must be refused, got ${denied.status}`);
+  }
+
+  const anon = await call(ctx, `/api/v1/operations/events/${DEMO_EVENT_ID}/attendance/scan`, {
+    method: 'POST',
+    body: { registration_id: DEMO_REG_CODE }
+  });
+  if (anon.status !== 401) throw new Error(`Anonymous scanning must be refused, got ${anon.status}`);
+
+  console.log('✅ Regression Test 18 Passed!');
+}
+
 export async function runRegressionTests() {
   await testExistingSuperAdminLogin();
   await testExistingUserLogin();
@@ -690,4 +918,7 @@ export async function runRegressionTests() {
   await testVolunteerCreationAndScannerOnlyPermissions();
   await testEventListingNeverErrorsForAnyRole();
   await testAuthSurvivesMissingOptionalColumn();
+  await testScannerResolvesQrAndManualIdIdentically();
+  await testManualIdMarksAttendanceOnFirstScan();
+  await testScannerValidationNotWeakened();
 }
